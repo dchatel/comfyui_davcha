@@ -9,6 +9,6 @@ Repository = "https://github.com/dchatel/comfyui_davcha"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "davcha"
 DisplayName = "comfyui_davcha"
 Icon = ""
