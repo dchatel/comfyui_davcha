@@ -1,9 +1,14 @@
+import os
 import re
 import torch
 from torchvision.transforms import InterpolationMode
 import torchvision.transforms.v2.functional as F
+import torchvision as tv
 from scipy import ndimage
 import numpy as np
+import node_helpers
+import folder_paths
+import comfy
 
 class PercentPadding:
     @classmethod
@@ -31,11 +36,14 @@ class PercentPadding:
         top, bottom = [int(x * h) for x in [top, bottom]]
         mask = torch.ones(b, h, w, dtype=torch.float32)
         mask = F.pad(mask, (left, top, right, bottom), 0, padding_mode='constant')
+        dist = ndimage.distance_transform_edt(mask)
+        soft_m = np.minimum(dist / 32, 1)
+        soft_m = torch.from_numpy(soft_m)
+        mask = soft_m
         image = F.pad(image, (left, top, right, bottom), 0, padding_mode='constant')
-        if c == 4:
-            image[:,3,...][mask==0] = 0
-        else:
-            image = torch.cat((image, mask.unsqueeze(1)),1)
+        if c != 4:
+            image = torch.cat((image, mask.unsqueeze(1)), 1)
+        # image[:,3,...] *= mask
         image = image.permute(0,2,3,1)
         return (image, )
     
@@ -113,12 +121,16 @@ class ResizeCropFit:
         b, c, sh, sw = image.shape
         _, _, th, tw = latent['samples'].shape
         th, tw = th * 8, tw * 8
+        if (th, tw) == (sh, sw):
+            return (image.permute(0,2,3,1), )
         if mode == 'resize':
             result = F.resize(image, (th, tw), InterpolationMode.NEAREST_EXACT)
         else:
             fun = max if mode == 'crop' else min
             scale = fun(torch.tensor((th/sh,tw/sw)))
             shape = tuple(int(x * scale) for x in [sh,sw])
+            mask = torch.ones((1, sh, sw))
+            mask = F.resize(mask, shape, InterpolationMode.NEAREST_EXACT)
             result = F.resize(image, shape, InterpolationMode.NEAREST_EXACT)
             phw = (
                 (tw - int(sw*scale))//2,
@@ -126,7 +138,16 @@ class ResizeCropFit:
                 (tw - int(sw*scale)+1)//2,
                 (th - int(sh*scale)+1)//2,
             )
+            mask = F.pad(mask, phw, fill=0, padding_mode='constant')
+            dist = ndimage.distance_transform_edt(mask)
+            soft_m = np.minimum(dist / 32, 1)
+            soft_m = torch.from_numpy(soft_m)
+            mask = soft_m
             result = F.pad(result, phw, fill=0, padding_mode='constant')
+            if c != 4:
+                result = torch.cat((result, mask.unsqueeze(1)), 1)
+            #     result[:,3,:,:] = 1
+            # result[:,3,:,:] *= mask
         result = result.permute(0,2,3,1)
         return (result, )
 
@@ -320,6 +341,245 @@ class ConditioningCompress:
             o[0] = reduc(o[0])
         return (out, )
     
+################ DavchaCLIPTextEncode
+
+import lark
+
+schedule_parser = lark.Lark(r"""
+!start: (prompt | /[][():]/+)*
+prompt: (emphasised | scheduled | plain | embedding | WHITESPACE)*
+emphasised: "(" prompt ":" [WHITESPACE] NUMBER [WHITESPACE] ")"
+scheduled: "[" [prompt ":"] prompt ":" [WHITESPACE] NUMBER [WHITESPACE] "]"
+embedding: "embedding:" /[A-Za-z0-9-_.]+/
+WHITESPACE: /\s+/
+plain: /([^\\\[\]():|]|\\.)+/
+%import common.SIGNED_NUMBER -> NUMBER
+""")
+
+def reduce(l):
+    if isinstance(l, list):
+        text = [('', (0, 1))]
+        for i in l:
+            text = [(f'{t}{x}', (max(xl, lb), min(xu, ub))) for t, (lb, ub) in text for x, (xl, xu) in i if max(xl, lb) < min(xu, ub)]
+        return text
+    else:
+        return l
+
+def visit(tree, lb=0.0, ub=1.0):
+    if isinstance(tree, list):
+        l = [visit(item, lb, ub) for item in tree]
+        if len(l) == 1:
+            l = l[0]
+        else:
+            l = [i for i in l if i is not None]
+            l = reduce(l)
+        return l
+      
+    elif isinstance(tree, lark.tree.Tree):
+        if tree.data.type == 'RULE':
+            if tree.data.value == 'start':
+                return visit(tree.children[0], lb, ub)
+            if tree.data.value == 'prompt':
+                return visit(tree.children, lb, ub)
+            if tree.data.value == 'plain':
+                return visit(tree.children, lb, ub)
+            if tree.data.value == 'scheduled':
+                ts = float(tree.children[3].value)
+                left = visit(tree.children[0], lb, ts)
+                right = visit(tree.children[1], ts, ub)
+                return left + right
+            if tree.data.value == 'emphasised':
+                prompts = visit(tree.children[0], lb, ub)
+                value = float(tree.children[2])
+                return [(f'({prompt}:{value})', (max(lb, pb), min(ub, pu))) for prompt, (pb, pu) in prompts if max(lb, pb) < min(ub, pu)]
+            if tree.data.value == 'embedding':
+                name = visit(tree.children[0])[0][0]
+                return [(f'embedding:{name}', (lb, ub))]
+    if isinstance(tree, lark.lexer.Token):
+        if tree.type == 'WHITESPACE':
+            return [(' ', (lb, ub))]
+        return [(tree.value, (lb, ub))]
+
+class DavchaCLIPTextEncode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}), 
+                "clip": ("CLIP", {"tooltip": "The CLIP model used for encoding the text."})
+            }
+        }
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+    
+    def run(self, clip, text):
+        texts = re.split(r"\b(AREA\(\s*(?:\d*\.?\d+\s*){4,5}\))", text)
+        
+        areas = []
+        current_area = None
+
+        for item in texts:
+            if item.startswith('AREA'):
+                current_area = item
+            else:
+                prompt = visit(schedule_parser.parse(item))
+                if current_area is None:
+                    areas.append((prompt, None))
+                else:
+                    values = re.findall(r"(\d*\.?\d+)", current_area)
+                    x, y, w, h, s = [float(i) for i in values + [1.0] * (5 - len(values))]
+                    areas.append((prompt, (x, y, w, h, s)))
+                current_area = None
+        
+        print(areas)
+        cs = []
+        for prompts, area in areas:
+            for text, (lb, ub) in prompts:
+                if len(text) > 0:
+                    tokens = clip.tokenize(text)
+                    output = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+                    cond = output.pop("cond")
+                    c = [[cond, output]]
+                    c = node_helpers.conditioning_set_values(c, {"start_percent": lb,
+                                                                "end_percent": ub})
+                    if area is not None:
+                        x, y, w, h, s = area
+                        c = node_helpers.conditioning_set_values(c, {"area": ("percentage", h, w, y, x),
+                                                                    "strength": s,
+                                                                    "set_area_to_bounds": False})
+                    cs += c
+        return (cs, )
+
+from pathlib import Path
+from webp import WebPData, WebPAnimDecoderOptions, WebPAnimDecoder, mimread
+
+def video_reader(file, start=0, count=0, target_fps=0):
+    if Path(file).suffix.lower() == '.webp':
+        return _webp_reader(file, start, count, target_fps)
+    else:
+        return _ffmpeg_reader(file, start, count, target_fps)
+    
+def _webp_reader(file, start, count, target_fps):
+    with open(file, 'rb') as f:
+        webp_data = WebPData.from_buffer(f.read())
+        dec_opts = WebPAnimDecoderOptions.new(use_threads=True)
+        dec = WebPAnimDecoder.new(webp_data, dec_opts)
+        eps = 1e-7
+        
+        frames_data = list(dec.frames())
+
+    frames = [arr[:,:,:3] for arr, _ in frames_data]
+    fps = 1000 * len(frames_data) / frames_data[-1][1]
+    if target_fps > 0:
+        if fps > target_fps:
+            frames = [frame[:,:,:3] for frame in mimread(file, fps=target_fps)]
+    else:
+        target_fps = fps
+    
+    if count > 0:
+        frames = frames[int(start):int(start+count)]
+    else:
+        frames = frames[int(start):]
+    
+    frames = torch.from_numpy(np.array(frames)).float() / 255.0
+
+    return frames, target_fps
+
+import cv2
+import numpy as np
+
+def _ffmpeg_reader(file, start, count, target_fps):
+    cap = cv2.VideoCapture(file)
+    
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    if target_fps == 0:
+        target_fps = fps
+    start_frame = int(min(max(0, start), frame_count - 1) * fps / target_fps)
+    if count == 0:
+        count = int(frame_count * target_fps / fps)
+    count = min(int(frame_count * target_fps / fps - start), count)
+    
+    frames = np.empty((count, frame_height, frame_width, 3), dtype=np.uint8)
+    for i in range(count):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame + i * fps / target_fps))
+        ret, frame = cap.read()
+        if not ret:
+            break
+    
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames[i] = frame_rgb
+    
+    cap.release()
+    
+    frames = torch.from_numpy(frames).float() / 255.0
+    
+    return frames, target_fps
+
+class DavchaLoadVideo:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "path": ("STRING", {"multiline": False}),
+                "start": ("INT", {"default": 0, "min": 0, "step": 1}),
+                "count": ("INT", {"default": 0, "min": 0, "step": 1}),
+                "target_fps": ("FLOAT", {"default": 0, "min": 0, "max": 60.0, "step": 0.01}),
+            }
+        }
+    RETURN_TYPES = ("IMAGE", "INT", "FLOAT")
+    RETURN_NAMES = ("frames", "frame_count", "fps")
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+    
+    def run(self, path, start, count, target_fps):
+        fullpath = os.path.join(folder_paths.get_input_directory(), path)
+        frames, fps = video_reader(fullpath, start, count, target_fps)
+        return (frames, len(frames), fps)
+    
+MAX_RESOLUTION = 16384
+
+class AnyType(str):
+    def __eq__(self, _) -> bool:
+        return True
+    def __ne__(self, __value: object) -> bool:
+        return False
+    
+class DavchaEmptyLatentImage:
+    def __init__(self):
+        self.device = comfy.model_management.intermediate_device()
+
+    @classmethod
+    def INPUT_TYPES(s):        
+        return {
+            "required": { 
+                "width": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The width of the latent images in pixels."}),
+                "height": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The height of the latent images in pixels."}),
+                "option": ([AnyType("*")], ),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."})
+            }
+        }
+    RETURN_TYPES = ("LATENT", "FLOAT", "INT")
+    RETURN_NAMES = ("latent", "upscale_factor", "batch_size")
+    OUTPUT_TOOLTIPS = ("The empty latent image batch.",)
+    FUNCTION = "generate"
+
+    CATEGORY = "davcha"
+    DESCRIPTION = "Create a new batch of empty latent images to be denoised via sampling."
+
+    def generate(self, width, height, option, batch_size=1):
+        width, height, upscale_factor = re.findall("(\d+)x(\d+): (\d+\.?\d*)", option)[0]
+        width, height, upscale_factor = int(width), int(height), float(upscale_factor)
+        latent = torch.zeros([batch_size, 4, height // 8, width // 8], device=self.device)
+        return ({"samples":latent}, upscale_factor, batch_size)
+
 NODE_CLASS_MAPPINGS = {
     'SmartMask': SmartMask,
     'ResizeCropFit': ResizeCropFit,
@@ -333,6 +593,9 @@ NODE_CLASS_MAPPINGS = {
     'DavchaModelMergeSD1' : DavchaModelMergeSD1,
     'DavchaModelMergeSDXL' : DavchaModelMergeSDXL,
     'ConditioningCompress': ConditioningCompress,
+    'DavchaCLIPTextEncode': DavchaCLIPTextEncode,
+    'DavchaLoadVideo': DavchaLoadVideo,
+    'DavchaEmptyLatentImage': DavchaEmptyLatentImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -348,4 +611,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'DavchaModelMergeSD1': 'DavchaModelMergeSD1',
     'DavchaModelMergeSDXL': 'DavchaModelMergeSDXL',
     'ConditioningCompress': 'ConditioningCompress',
+    'DavchaCLIPTextEncode': 'CLIP Text Encode (Davcha)',
+    'DavchaLoadVideo': 'Load Video (Davcha)',
+    'DavchaEmptyLatentImage': 'Empty Latent Image (Davcha)',
 }
