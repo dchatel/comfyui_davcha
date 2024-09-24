@@ -43,7 +43,8 @@ class PercentPadding:
         image = F.pad(image, (left, top, right, bottom), 0, padding_mode='constant')
         if c != 4:
             image = torch.cat((image, mask.unsqueeze(1)), 1)
-        # image[:,3,...] *= mask
+        else:
+            image[:,3,...] *= mask
         image = image.permute(0,2,3,1)
         return (image, )
     
@@ -147,7 +148,8 @@ class ResizeCropFit:
             if c != 4:
                 result = torch.cat((result, mask.unsqueeze(1)), 1)
             #     result[:,3,:,:] = 1
-            # result[:,3,:,:] *= mask
+            else:
+                result[:,3,:,:] *= mask
         result = result.permute(0,2,3,1)
         return (result, )
 
@@ -176,6 +178,28 @@ class SoftErosion:
             soft_mask.append(soft_m)
         soft_mask = torch.from_numpy(np.array(soft_mask))
         return (soft_mask, )
+    
+class ApplyMask:
+    RETURN_TYPES = ('IMAGE',)
+    FUNCTION = 'run'
+    CATEGORY = 'davcha'
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'image': ('IMAGE',),
+                'mask': ('MASK',),
+            }
+        }
+    
+    def run(self, image, mask):
+        image = image.permute(0,3,1,2)
+        _, _, h, w = image.shape
+        mask = F.resize(mask, (h, w), InterpolationMode.BICUBIC)
+        image = image.permute(0,2,3,1)[:,:,:,:3]
+        image *= mask[...,None]
+        return (image, )
     
 class DStack:
     RETURN_TYPES = ('IMAGE',)
@@ -585,6 +609,7 @@ NODE_CLASS_MAPPINGS = {
     'ResizeCropFit': ResizeCropFit,
     'PercentPadding': PercentPadding,
     'SoftErosion': SoftErosion,
+    'ApplyMask': ApplyMask,
     'StringScheduleHelper': StringScheduleHelper,
     'DStack': DStack,
     'DavchaConditioningConcat': DavchaConditioningConcat,
@@ -603,6 +628,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'ResizeCropFit': 'Resize, Crop or Fit',
     'PercentPadding': 'Percent Padding',
     'SoftErosion': 'SoftErosion',
+    'ApplyMask': 'ApplyMask',
     'StringScheduleHelper': 'StringScheduleHelper',
     'DStack': 'DStack',
     'DavchaConditioningConcat': 'DavchaConditioningConcat',
