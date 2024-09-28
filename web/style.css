@@ -1,0 +1,11 @@
+/* .app-menu[data-pc-section="root"] {
+    left: auto;
+    top: 0;
+    right: 25%;
+    bottom: auto;
+    transform: unset;
+} */
+
+.p-panel-content[data-pc-section="content"] {
+    padding: 0 0.5rem;
+}
