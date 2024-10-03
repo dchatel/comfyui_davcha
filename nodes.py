@@ -38,7 +38,7 @@ class PercentPadding:
         mask = F.pad(mask, (left, top, right, bottom), 0, padding_mode='constant')
         dist = ndimage.distance_transform_edt(mask)
         soft_m = np.minimum(dist / 32, 1)
-        soft_m = torch.from_numpy(soft_m)
+        soft_m = torch.from_numpy(soft_m).type(torch.float32)
         mask = soft_m
         image = F.pad(image, (left, top, right, bottom), 0, padding_mode='constant')
         if c != 4:
@@ -142,7 +142,7 @@ class ResizeCropFit:
             mask = F.pad(mask, phw, fill=0, padding_mode='constant')
             dist = ndimage.distance_transform_edt(mask)
             soft_m = np.minimum(dist / 32, 1)
-            soft_m = torch.from_numpy(soft_m)
+            soft_m = torch.from_numpy(soft_m).type(torch.float32)
             mask = soft_m
             result = F.pad(result, phw, fill=0, padding_mode='constant')
             if c != 4:
@@ -604,6 +604,42 @@ class DavchaEmptyLatentImage:
         latent = torch.zeros([batch_size, 4, height // 8, width // 8], device=self.device)
         return ({"samples":latent}, upscale_factor, batch_size)
 
+class DavchaMaskImage:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "image": ("IMAGE",),
+                              "mask": ("MASK",),
+                              }}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+
+    def run(self, image, mask):
+        b, w, h, c = image.shape
+        mask = F.resize(mask, (w, h), InterpolationMode.BICUBIC)
+        image = image.permute(0, 3, 1, 2)
+        if c != 4:
+            image = torch.cat((image, torch.ones((b, 1, w, h), dtype=torch.float32)), 1)# mask.unsqueeze(1)), 1)
+        image = image * mask.unsqueeze(1)
+        image = image.permute(0, 2, 3, 1)
+        return (image, )
+
+class DavchaPop:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "items": (AnyType("*"),),
+                              }}
+    INPUT_IS_LIST = (True, )
+    OUTPUT_IS_LIST = (False, True)
+    RETURN_TYPES = (AnyType("*"), AnyType("*"))
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+
+    def run(self, items):
+        return (items[0], items[1:])
+
 NODE_CLASS_MAPPINGS = {
     'SmartMask': SmartMask,
     'ResizeCropFit': ResizeCropFit,
@@ -621,6 +657,8 @@ NODE_CLASS_MAPPINGS = {
     'DavchaCLIPTextEncode': DavchaCLIPTextEncode,
     'DavchaLoadVideo': DavchaLoadVideo,
     'DavchaEmptyLatentImage': DavchaEmptyLatentImage,
+    'DavchaMaskImage': DavchaMaskImage,
+    'DavchaPop': DavchaPop,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -640,4 +678,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'DavchaCLIPTextEncode': 'CLIP Text Encode (Davcha)',
     'DavchaLoadVideo': 'Load Video (Davcha)',
     'DavchaEmptyLatentImage': 'Empty Latent Image (Davcha)',
+    'DavchaMaskImage': 'Mask Image (Davcha)',
+    'DavchaPop': 'Pop',
 }
