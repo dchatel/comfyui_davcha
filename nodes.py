@@ -235,8 +235,10 @@ class DavchaConditioningConcat:
 
     def concat(self, conditioning_to, conditioning_from):
         out = []
+        
+        if len(conditioning_from) < 1: return (conditioning_to,)
+        if len(conditioning_to) < 1: return (conditioning_from,)
 
-        print(conditioning_to[0][0].dtype, conditioning_from[0][0].dtype)
         cond_from = conditioning_from[0][0].to(conditioning_to[0][0].device)
 
         for i in range(len(conditioning_to)):
