@@ -367,62 +367,45 @@ class ConditioningCompress:
     
 ################ DavchaCLIPTextEncode
 
-import lark
+import regex
+from itertools import product
 
-schedule_parser = lark.Lark(r"""
-!start: (prompt | /[][():]/+)*
-prompt: (emphasised | scheduled | plain | embedding | WHITESPACE)*
-emphasised: "(" prompt ":" [WHITESPACE] NUMBER [WHITESPACE] ")"
-scheduled: "[" [prompt ":"] prompt ":" [WHITESPACE] NUMBER [WHITESPACE] "]"
-embedding: "embedding:" /[A-Za-z0-9-_.]+/
-WHITESPACE: /\s+/
-plain: /([^\\\[\]():|]|\\.)+/
-%import common.SIGNED_NUMBER -> NUMBER
-""")
-
-def reduce(l):
-    if isinstance(l, list):
-        text = [('', (0, 1))]
-        for i in l:
-            text = [(f'{t}{x}', (max(xl, lb), min(xu, ub))) for t, (lb, ub) in text for x, (xl, xu) in i if max(xl, lb) < min(xu, ub)]
-        return text
-    else:
-        return l
-
-def visit(tree, lb=0.0, ub=1.0):
-    if isinstance(tree, list):
-        l = [visit(item, lb, ub) for item in tree]
-        if len(l) == 1:
-            l = l[0]
+def parse(text):
+    def _inner(text, start=0, end=1):
+        matches = regex.findall(r'(\[((?:(?:embedding:)?[^\[\]])*?):((?:(?:embedding:)?[^\[\]])*?):(\d*\.?\d+)\])', text, regex.DOTALL)
+        if len(matches) == 0:
+            return [(text, (start, end))]
+        x = [m[1:3] for m in matches]
+        prod = list(product(*x))
+        results = {}
+        for p in prod:
+            if p not in results: results[p] = []
+            for f, b, a, t in matches:
+                t = float(t)
+                if b in p:
+                    results[p].append((f, b, (start, t)))
+                if a in p:
+                    results[p].append((f, a, (t, end)))
+        final = []
+        for items in results.values():
+            txt = text
+            st, en = start, end
+            for f, r, (s, e) in items:
+                txt = txt.replace(f, r)
+                st = max(st, s)
+                en = min(en, e)
+            if st <= en:
+                for prompt, (a, b) in _inner(txt, st, en):
+                    final.append((prompt, (a, b)))
+        return final
+    candidates = _inner(text)
+    dic = {}
+    for prompt, (s, e) in candidates:
+        if prompt not in dic:
+            dic[prompt] = (s, e)
         else:
-            l = [i for i in l if i is not None]
-            l = reduce(l)
-        return l
-      
-    elif isinstance(tree, lark.tree.Tree):
-        if tree.data.type == 'RULE':
-            if tree.data.value == 'start':
-                return visit(tree.children[0], lb, ub)
-            if tree.data.value == 'prompt':
-                return visit(tree.children, lb, ub)
-            if tree.data.value == 'plain':
-                return visit(tree.children, lb, ub)
-            if tree.data.value == 'scheduled':
-                ts = float(tree.children[3].value)
-                left = visit(tree.children[0], lb, ts)
-                right = visit(tree.children[1], ts, ub)
-                return left + right
-            if tree.data.value == 'emphasised':
-                prompts = visit(tree.children[0], lb, ub)
-                value = float(tree.children[2])
-                return [(f'({prompt}:{value})', (max(lb, pb), min(ub, pu))) for prompt, (pb, pu) in prompts if max(lb, pb) < min(ub, pu)]
-            if tree.data.value == 'embedding':
-                name = visit(tree.children[0])[0][0]
-                return [(f'embedding:{name}', (lb, ub))]
-    if isinstance(tree, lark.lexer.Token):
-        if tree.type == 'WHITESPACE':
-            return [(' ', (lb, ub))]
-        return [(tree.value, (lb, ub))]
+            dic[prompt] = (min(s, dic[prompt][0]), max(e, dic[prompt][1]))
+    return [(prompt, (s,e)) for prompt, (s, e) in dic.items()]
 
 class DavchaCLIPTextEncode:
     @classmethod
@@ -448,7 +431,7 @@ class DavchaCLIPTextEncode:
             if item.startswith('AREA'):
                 current_area = item
             else:
-                prompt = visit(schedule_parser.parse(item))
+                prompt = parse(item)
                 if current_area is None:
                     areas.append((prompt, None))
                 else:
@@ -457,7 +440,10 @@ class DavchaCLIPTextEncode:
                     areas.append((prompt, (x, y, w, h, s)))
                 current_area = None
         
-        print(areas)
+        for schedule, area in areas:
+            for prompt, (start, end) in schedule:
+                print(f'{area} {start}-{end}: {prompt}')
+
         cs = []
         for prompts, area in areas:
             for text, (lb, ub) in prompts:
