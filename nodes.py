@@ -40,7 +40,7 @@ class PercentPadding:
         soft_m = np.minimum(dist / 32, 1)
         soft_m = torch.from_numpy(soft_m).type(torch.float32)
         mask = soft_m
-        image = F.pad(image, (left, top, right, bottom), 0, padding_mode='constant')
+        image = F.pad(image, (left, top, right, bottom), 0.5, padding_mode='constant')
         if c != 4:
             image = torch.cat((image, mask.unsqueeze(1)), 1)
         else:
@@ -144,7 +144,7 @@ class ResizeCropFit:
             soft_m = np.minimum(dist / 32, 1)
             soft_m = torch.from_numpy(soft_m).type(torch.float32)
             mask = soft_m
-            result = F.pad(result, phw, fill=0, padding_mode='constant')
+            result = F.pad(result, phw, fill=0.5, padding_mode='constant')
             if c != 4:
                 result = torch.cat((result, mask.unsqueeze(1)), 1)
             #     result[:,3,:,:] = 1
