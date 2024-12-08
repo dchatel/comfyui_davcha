@@ -176,7 +176,7 @@ class SoftErosion:
             soft_m = np.minimum(dist / size, 1)
             soft_m = torch.from_numpy(soft_m)
             soft_mask.append(soft_m)
-        soft_mask = torch.from_numpy(np.array(soft_mask))
+        soft_mask = torch.from_numpy(np.array(soft_mask)).type(torch.FloatTensor)
         return (soft_mask, )
     
 class ApplyMask:
