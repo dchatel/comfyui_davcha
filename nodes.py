@@ -419,50 +419,55 @@ class DavchaCLIPTextEncode:
             }
         }
     RETURN_TYPES = ("CONDITIONING",)
+    OUTPUT_IS_LIST = (True,)
     FUNCTION = "run"
 
     CATEGORY = "davcha"
     
     def run(self, clip, text):
-        texts = re.split(r"\b(AREA\(\s*(?:\d*\.?\d+\s*){4,5}\))", text)
-        
-        areas = []
-        current_area = None
+        text = text.split('|')
+        result = []
+        for txt in text:
+            texts = re.split(r"\b(AREA\(\s*(?:\d*\.?\d+\s*){4,5}\))", txt)
+            
+            areas = []
+            current_area = None
 
-        for item in texts:
-            if item.startswith('AREA'):
-                current_area = item
-            else:
-                prompt = parse(item)
-                if current_area is None:
-                    areas.append((prompt, None))
+            for item in texts:
+                if item.startswith('AREA'):
+                    current_area = item
                 else:
-                    values = re.findall(r"(\d*\.?\d+)", current_area)
-                    x, y, w, h, s = [float(i) for i in values + [1.0] * (5 - len(values))]
-                    areas.append((prompt, (x, y, w, h, s)))
-                current_area = None
-        
-        for schedule, area in areas:
-            for prompt, (start, end) in schedule:
-                print(f'{area} {start}-{end}: {prompt}')
+                    prompt = parse(item)
+                    if current_area is None:
+                        areas.append((prompt, None))
+                    else:
+                        values = re.findall(r"(\d*\.?\d+)", current_area)
+                        x, y, w, h, s = [float(i) for i in values + [1.0] * (5 - len(values))]
+                        areas.append((prompt, (x, y, w, h, s)))
+                    current_area = None
+            
+            for schedule, area in areas:
+                for prompt, (start, end) in schedule:
+                    print(f'{area} {start}-{end}: {prompt}')
 
-        cs = []
-        for prompts, area in areas:
-            for text, (lb, ub) in prompts:
-                if len(text) > 0:
-                    tokens = clip.tokenize(text)
-                    output = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
-                    cond = output.pop("cond")
-                    c = [[cond, output]]
-                    c = node_helpers.conditioning_set_values(c, {"start_percent": lb,
-                                                                "end_percent": ub})
-                    if area is not None:
-                        x, y, w, h, s = area
-                        c = node_helpers.conditioning_set_values(c, {"area": ("percentage", h, w, y, x),
-                                                                    "strength": s,
-                                                                    "set_area_to_bounds": False})
-                    cs += c
-        return (cs, )
+            cs = []
+            for prompts, area in areas:
+                for txt, (lb, ub) in prompts:
+                    if len(txt) > 0:
+                        tokens = clip.tokenize(txt)
+                        output = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+                        cond = output.pop("cond")
+                        c = [[cond, output]]
+                        c = node_helpers.conditioning_set_values(c, {"start_percent": lb,
+                                                                    "end_percent": ub})
+                        if area is not None:
+                            x, y, w, h, s = area
+                            c = node_helpers.conditioning_set_values(c, {"area": ("percentage", h, w, y, x),
+                                                                        "strength": s,
+                                                                        "set_area_to_bounds": False})
+                        cs += c
+            result.append(cs)
+        return (result, )
 
 from pathlib import Path
 from webp import WebPData, WebPAnimDecoderOptions, WebPAnimDecoder, mimread
