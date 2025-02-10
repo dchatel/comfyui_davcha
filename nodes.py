@@ -10,6 +10,84 @@ import node_helpers
 import folder_paths
 import comfy
 
+class PadAndResize:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'image': ('IMAGE',),
+                'latent': ('LATENT',),
+                'mode': (['resize', 'crop', 'fit'],),
+                'left': ('FLOAT', {'min': 0, 'step': .01, 'default': 0}),
+                'top': ('FLOAT', {'min': 0, 'step': .01, 'default': 0}),
+                'right': ('FLOAT', {'min': 0, 'step': .01, 'default': 0}),
+                'bottom': ('FLOAT', {'min': 0, 'step': .01, 'default': 0}),
+                }
+            }
+    
+    RETURN_TYPES = ('IMAGE',)
+    
+    FUNCTION = 'run'
+
+    CATEGORY = 'davcha'
+
+    def run(self, image, latent, mode, left, top, right, bottom):
+        image = image.permute(0,3,1,2)
+        image = self.pad(image, left, top, right, bottom)
+        image = self.resize(image, latent, mode)
+        image = image.permute(0,2,3,1)
+        return (image,)
+    
+    def resize(self, image, latent, mode):
+        b, c, sh, sw = image.shape
+        _, _, th, tw = latent['samples'].shape
+        th, tw = th * 8, tw * 8
+        if (th, tw) == (sh, sw):
+            return (image.permute(0,2,3,1), )
+        if mode == 'resize':
+            result = F.resize(image, (th, tw), InterpolationMode.NEAREST_EXACT)
+        else:
+            fun = max if mode == 'crop' else min
+            scale = fun(torch.tensor((th/sh,tw/sw)))
+            shape = tuple(int(x * scale) for x in [sh,sw])
+            mask = torch.ones((1, sh, sw))
+            mask = F.resize(mask, shape, InterpolationMode.NEAREST_EXACT)
+            result = F.resize(image, shape, InterpolationMode.NEAREST_EXACT)
+            phw = (
+                (tw - int(sw*scale))//2,
+                (th - int(sh*scale))//2,
+                (tw - int(sw*scale)+1)//2,
+                (th - int(sh*scale)+1)//2,
+            )
+            mask = F.pad(mask, phw, fill=0, padding_mode='constant')
+            dist = ndimage.distance_transform_edt(mask)
+            soft_m = np.minimum(dist / 32, 1)
+            soft_m = torch.from_numpy(soft_m).type(torch.float32)
+            mask = soft_m
+            result = F.pad(result, phw, fill=0.5, padding_mode='constant')
+            if c != 4:
+                result = torch.cat((result, mask.unsqueeze(1)), 1)
+            else:
+                result[:,3,:,:] *= mask
+        return result
+
+    def pad(self, image, left, top, right, bottom):
+        b, c, h, w = image.shape
+        left, right = [int(x * w) for x in [left, right]]
+        top, bottom = [int(x * h) for x in [top, bottom]]
+        mask = torch.ones(b, h, w, dtype=torch.float32)
+        mask = F.pad(mask, (left, top, right, bottom), 0, padding_mode='constant')
+        dist = ndimage.distance_transform_edt(mask)
+        soft_m = np.minimum(dist / 32, 1)
+        soft_m = torch.from_numpy(soft_m).type(torch.float32)
+        mask = soft_m
+        image = F.pad(image, (left, top, right, bottom), 0.5, padding_mode='constant')
+        if c != 4:
+            image = torch.cat((image, mask.unsqueeze(1)), 1)
+        else:
+            image[:,3,...] *= mask
+        return image
+    
 class PercentPadding:
     @classmethod
     def INPUT_TYPES(cls):
@@ -634,6 +712,7 @@ class DavchaPop:
         return (items[0], items[1:])
 
 NODE_CLASS_MAPPINGS = {
+    'PadAndResize': PadAndResize,
     'SmartMask': SmartMask,
     'ResizeCropFit': ResizeCropFit,
     'PercentPadding': PercentPadding,
@@ -655,6 +734,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'PadAndResize': 'PadAndResize',
     'SmartMask': 'SmartMask',
     'ResizeCropFit': 'Resize, Crop or Fit',
     'PercentPadding': 'Percent Padding',
