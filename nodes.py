@@ -1,9 +1,10 @@
 import os
 import re
+from glob import glob
 import torch
 from torchvision.transforms import InterpolationMode
 import torchvision.transforms.v2.functional as F
-import torchvision as tv
+from llama_cpp_cuda import Llama
 from scipy import ndimage
 import numpy as np
 import node_helpers
@@ -43,7 +44,7 @@ class PadAndResize:
         _, _, th, tw = latent['samples'].shape
         th, tw = th * 8, tw * 8
         if (th, tw) == (sh, sw):
-            return (image.permute(0,2,3,1), )
+            return image
         if mode == 'resize':
             result = F.resize(image, (th, tw), InterpolationMode.NEAREST_EXACT)
         else:
@@ -711,7 +712,104 @@ class DavchaPop:
     def run(self, items):
         return (items[0], items[1:])
 
+gguf_folder = os.path.join(folder_paths.models_dir, "llm_gguf")
+if os.path.isdir(gguf_folder):
+    gguf_files = [file for file in os.listdir(gguf_folder) if file.endswith('.gguf')]
+else:
+    gguf_files = []
+    
+class DavchaLoadLLM:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'modelname': (gguf_files,),
+        }}
+    RETURN_NAMES = ('model',)
+    RETURN_TYPES = ('DavchaLLModel',)
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+    
+    def run(self, modelname):
+        model_path = os.path.join(gguf_folder, modelname)
+        model = Llama(
+            model_path=model_path,
+            n_gpu_layers=-1,
+            verbose=False,
+            n_ctx=2048,
+        )
+        return (model,)        
+
+class DavchaLLMAdvanced:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'model': ('DavchaLLModel',),
+            'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
+            'system': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+            'text': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+            'max_tokens': ('INT', {'default': 512, 'min': 1, 'max': 8192}),
+            'temperature': ('FLOAT', {'default': 1.0, 'min': 0, 'max': 1.0, 'step': 0.1}),
+            'top_p': ('FLOAT', {'default': 0.9, 'min': 0, 'max': 1.0, 'step': 0.1}),
+            'top_k': ('INT', {'default': 50, 'min': 0, 'max': 100}),
+            'repeat_penalty': ('FLOAT', {'default': 1.2, 'min': 0, 'max': 5.0, 'step': 0.1}),
+        }}
+    
+    RETURN_NAMES = ('text',)
+    RETURN_TYPES = ('STRING',)
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+    
+    def run(self, model, seed, system, text, max_tokens, temperature, top_p, top_k, repeat_penalty):
+        generate_kwargs = {
+            'max_tokens': max_tokens,
+            'temperature': temperature,
+            'top_p': top_p,
+            'top_k': top_k,
+            'repeat_penalty': repeat_penalty
+        }
+        msgs = []
+        if len(system.strip()) > 0:
+            msgs += [{'role': 'system', 'content': system}]
+        msgs += [{"role": "user", "content": text}]
+        model.set_seed(seed)
+        llm_result = model.create_chat_completion(msgs, **generate_kwargs)
+        return (llm_result['choices'][0]['message']['content'].strip(),)
+
+class DavchaLLM:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'model': ('DavchaLLModel',),
+            'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
+            'text': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+        }}
+    
+    RETURN_NAMES = ('text',)
+    RETURN_TYPES = ('STRING',)
+    FUNCTION = "run"
+
+    CATEGORY = "davcha"
+    
+    def run(self, model, seed, text):
+        generate_kwargs = {
+            'max_tokens': 512,
+            'temperature': 1.0,
+            'top_p': 0.9,
+            'top_k': 50,
+            'repeat_penalty': 1.2
+        }
+        msgs = []
+        msgs += [{"role": "user", "content": text}]
+        model.set_seed(seed)
+        llm_result = model.create_chat_completion(msgs, **generate_kwargs)
+        return (llm_result['choices'][0]['message']['content'].strip(),)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaLoadLLM': DavchaLoadLLM,
+    'DavchaLLM': DavchaLLM,
+    'DavchaLLMAdvanced': DavchaLLMAdvanced,
     'PadAndResize': PadAndResize,
     'SmartMask': SmartMask,
     'ResizeCropFit': ResizeCropFit,
@@ -734,6 +832,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaLoadLLM': 'DavchaLoadLLM',
+    'DavchaLLM': 'DavchaLLM',
+    'DavchaLLMAdvanced': 'DavchaLLMAdvanced',
     'PadAndResize': 'PadAndResize',
     'SmartMask': 'SmartMask',
     'ResizeCropFit': 'Resize, Crop or Fit',
