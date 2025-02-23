@@ -4,7 +4,7 @@ from glob import glob
 import torch
 from torchvision.transforms import InterpolationMode
 import torchvision.transforms.v2.functional as F
-from llama_cpp_cuda import Llama
+from llama_cpp import Llama
 from scipy import ndimage
 import numpy as np
 import node_helpers

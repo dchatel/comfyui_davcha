@@ -23,7 +23,6 @@ app.registerExtension({
 
                 const body = new FormData();
                 body.append("image", file);
-                // if (pasted) body.append("subfolder", "pasted");
                 const resp = await api.fetchApi("/upload/image", {
                     method: "POST",
                     body
@@ -48,7 +47,7 @@ app.registerExtension({
 
             for (let i = 0; i < x.length; i++) {
                 for (let j = 0; j < y.length; j++) {
-                    if (x[i] / y[j] === ratio && Math.round(lastX / x[i] * 100) / 100 === lastX / x[i]) {
+                    if (x[i] >= 256 && y[j] >= 256 && x[i] / y[j] === ratio && Math.round(lastX / x[i] * 100) / 100 === lastX / x[i]) {
                         options.push(`${x[i]}x${y[j]}: ${lastX / x[i]}`);
                     }
                 }
@@ -57,24 +56,7 @@ app.registerExtension({
         }
 
         const update = function (node, option_value = null) {
-            const width = node.widgets.find(w => w.name == "width").value;
-            const height = node.widgets.find(w => w.name == "height").value;
-            const x = Array.from({ length: (width + 1) / 8 + 1 }, (_, i) => i * 8);
-            const y = Array.from({ length: (height + 1) / 8 + 1 }, (_, i) => i * 8);
-
-            const lastX = x[x.length - 1];
-            const lastY = y[y.length - 1];
-            const ratio = lastX / lastY;
-
-            const options = [];
-
-            for (let i = 0; i < x.length; i++) {
-                for (let j = 0; j < y.length; j++) {
-                    if (x[i] / y[j] === ratio && Math.round(lastX / x[i] * 100) / 100 === lastX / x[i]) {
-                        options.push(`${x[i]}x${y[j]}: ${lastX / x[i]}`);
-                    }
-                }
-            }
+            const options = getOptions(node);
 
             const option = node.widgets.find(w => w.name == 'option')
             option.options = { values: options };
