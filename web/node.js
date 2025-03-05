@@ -47,7 +47,7 @@ app.registerExtension({
 
             for (let i = 0; i < x.length; i++) {
                 for (let j = 0; j < y.length; j++) {
-                    if (x[i] >= 256 && y[j] >= 256 && x[i] / y[j] === ratio && Math.round(lastX / x[i] * 100) / 100 === lastX / x[i]) {
+                    if (x[i] >= 360 && y[j] >= 360 && x[i] / y[j] === ratio && Math.round(lastX / x[i] * 100) / 100 === lastX / x[i]) {
                         options.push(`${x[i]}x${y[j]}: ${lastX / x[i]}`);
                     }
                 }
@@ -82,7 +82,6 @@ app.registerExtension({
             };
 
             nodeType.prototype.refreshComboInNode = function(defs){
-                const option_value = this.widgets.find(w => w.name == 'option').value;
                 const options = getOptions(this);
                 defs['DavchaEmptyLatentImage']['input']['required']['option'] = [options, {}];
             };
