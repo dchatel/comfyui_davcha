@@ -671,9 +671,10 @@ class DavchaEmptyLatentImage:
     DESCRIPTION = "Create a new batch of empty latent images to be denoised via sampling."
 
     def generate(self, width, height, option, batch_size=1):
-        width, height, upscale_factor = re.findall(r"(\d+)x(\d+): (\d+\.?\d*)", option)[0]
-        width, height, upscale_factor = int(width), int(height), float(upscale_factor)
-        latent = torch.zeros([batch_size, 4, height // 8, width // 8], device=self.device)
+        w, h, _ = re.findall(r"(\d+)x(\d+): (\d+\.?\d*)", option)[0]
+        w, h = int(w), int(h)
+        upscale_factor = width / w
+        latent = torch.zeros([batch_size, 4, h // 8, w // 8], device=self.device)
         return ({"samples":latent}, upscale_factor, batch_size)
 
 class DavchaMaskImage:
