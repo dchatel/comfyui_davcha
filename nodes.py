@@ -61,10 +61,11 @@ class PadAndResize:
                 (th - int(sh*scale)+1)//2,
             )
             mask = F.pad(mask, phw, fill=0, padding_mode='constant')
-            dist = ndimage.distance_transform_edt(mask)
-            soft_m = np.minimum(dist / 32, 1)
-            soft_m = torch.from_numpy(soft_m).type(torch.float32)
-            mask = soft_m
+            if mask.sum() != np.prod(mask.shape[-2:]):
+                dist = ndimage.distance_transform_edt(mask)
+                soft_m = np.minimum(dist / 32, 1)
+                soft_m = torch.from_numpy(soft_m).type(torch.float32)
+                mask = soft_m
             result = F.pad(result, phw, fill=0.5, padding_mode='edge')
             if c != 4:
                 result = torch.cat((result, mask.unsqueeze(1)), 1)
