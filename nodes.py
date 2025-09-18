@@ -627,7 +627,7 @@ class DavchaLoadVideo:
                 "path": ("STRING", {"multiline": False}),
                 "start": ("INT", {"default": 0, "min": 0, "step": 1}),
                 "count": ("INT", {"default": 0, "min": 0, "step": 1}),
-                "target_fps": ("FLOAT", {"default": 0, "min": 0, "max": 60.0, "step": 0.01}),
+                "target_fps": ("FLOAT", {"default": 0, "min": 0, "step": 0.01}),
             }
         }
     RETURN_TYPES = ("IMAGE", "INT", "FLOAT")
