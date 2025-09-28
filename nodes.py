@@ -41,7 +41,7 @@ class PadAndResize:
     
     def resize(self, image, latent, mode):
         b, c, sh, sw = image.shape
-        _, _, th, tw = latent['samples'].shape
+        *_, th, tw = latent['samples'].shape
         th, tw = th * 8, tw * 8
         if (th, tw) == (sh, sw):
             return image
