@@ -10,6 +10,7 @@ import numpy as np
 import node_helpers
 import folder_paths
 import comfy
+from nodes import LoraLoader
 
 class PadAndResize:
     @classmethod
@@ -808,7 +809,93 @@ class DavchaLLM:
         llm_result = model.create_chat_completion(msgs, **generate_kwargs)
         return (llm_result['choices'][0]['message']['content'].strip(),)
 
+def viterbi_distance(a, b):
+    """Compute the Viterbi distance between two sequences."""
+    n = len(a)
+    m = len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]) + 1
+    return dp[n][m]
+
+def viterbi_diff(a, b):
+    """Compute the Viterbi diff between two sequences."""
+    n = len(a)
+    m = len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]) + 1
+    i, j = n, m
+    diff = []
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and a[i - 1] == b[j - 1]:
+            diff.append((' ', a[i - 1], b[j - 1]))
+            i -= 1
+            j -= 1
+        elif j > 0 and (i == 0 or dp[i][j] == dp[i][j - 1] + 1):
+            diff.append(('+', '', b[j - 1]))
+            j -= 1
+        elif i > 0 and (j == 0 or dp[i][j] == dp[i - 1][j] + 1):
+            diff.append(('-', a[i - 1], ''))
+            i -= 1
+        else:
+            diff.append(('*', a[i - 1], b[j - 1]))
+            i -= 1
+            j -= 1
+    diff.reverse()
+    return diff
+
+def get_highlow(lorapath, m):
+    x = os.path.normpath(m[0][0])
+    files = [os.path.relpath(f, lorapath) for f in glob(os.path.join(lorapath, os.path.dirname(x), '*.safetensors'))]
+    files.sort(key=lambda f: viterbi_distance(x, f))
+    other = files[1]
+    diff = viterbi_diff(x,other)
+    x_tag = ''.join(d[1] for d in diff if d[0]=='*').lower()
+    high, low = (x,other) if 'hi' in x_tag else (other,x)
+    return (high, low)
+    
+class DavchaWan22LoraTagLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'high': ('MODEL',),
+            'low': ('MODEL',),
+            'txt': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+        }}
+    RETURN_NAMES = ('high','low', 'txt')
+    RETURN_TYPES = ('MODEL','MODEL', 'STRING')
+    FUNCTION = "run"
+    CATEGORY = "davcha"
+        
+    def run(self, high, low, txt):
+        loraspath = folder_paths.get_folder_paths('loras')[0]
+        m = re.findall(r'<lora:([^:]+):([^>]+)>', txt)
+        for model, weight in m:
+            lora_high, lora_low = get_highlow(loraspath, [(model, weight)])
+            high, _ = LoraLoader().load_lora(high, None, lora_high, float(weight), float(weight))
+            low, _ = LoraLoader().load_lora(low, None, lora_low, float(weight), float(weight))
+        txt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
+        return (high, low, txt)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
     'DavchaLoadLLM': DavchaLoadLLM,
     'DavchaLLM': DavchaLLM,
     'DavchaLLMAdvanced': DavchaLLMAdvanced,
@@ -834,6 +921,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
     'DavchaLoadLLM': 'DavchaLoadLLM',
     'DavchaLLM': 'DavchaLLM',
     'DavchaLLMAdvanced': 'DavchaLLMAdvanced',
