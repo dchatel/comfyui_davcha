@@ -868,7 +868,7 @@ def get_highlow(lorapath, m):
     other = files[1]
     diff = viterbi_diff(x,other)
     x_tag = ''.join(d[1] for d in diff if d[0]=='*').lower()
-    high, low = (x,other) if 'hi' in x_tag else (other,x)
+    high, low = (x,other) if 'h' in x_tag else (other,x)
     return (high, low)
     
 class DavchaWan22LoraTagLoader:
