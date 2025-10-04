@@ -11,6 +11,8 @@ import node_helpers
 import folder_paths
 import comfy
 from nodes import LoraLoader
+from comfy_api.latest import io
+import math
 
 class PadAndResize:
     @classmethod
@@ -894,7 +896,57 @@ class DavchaWan22LoraTagLoader:
         txt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
         return (high, low, txt)
 
+class DavchaTextEncodeQwenImageEditPlus(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeQwenImageEditPlus",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.Vae.Input("vae", optional=True),
+                io.Image.Input("image1", optional=True),
+                io.Image.Input("image2", optional=True),
+                io.Image.Input("image3", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, vae=None, image1=None, image2=None, image3=None) -> io.NodeOutput:
+        ref_latents = []
+        images = [image1, image2, image3]
+        images_vl = []
+        llama_template = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+        image_prompt = ""
+
+        for i, image in enumerate(images):
+            if image is not None:
+                samples = image.movedim(-1, 1)
+                total = int(384 * 384)
+
+                scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
+                width = round(samples.shape[3] * scale_by)
+                height = round(samples.shape[2] * scale_by)
+
+                s = comfy.utils.common_upscale(samples, width, height, "area", "disabled")
+                images_vl.append(s.movedim(1, -1))
+                if vae is not None:
+                    ref_latents.append(vae.encode(samples.movedim(1, -1)[:, :, :, :3]))
+
+                image_prompt += "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(i + 1)
+
+        tokens = clip.tokenize(image_prompt + prompt, images=images_vl, llama_template=llama_template)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        if len(ref_latents) > 0:
+            conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": ref_latents}, append=True)
+        return io.NodeOutput(conditioning)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
     'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
     'DavchaLoadLLM': DavchaLoadLLM,
     'DavchaLLM': DavchaLLM,
@@ -921,6 +973,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
     'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
     'DavchaLoadLLM': 'DavchaLoadLLM',
     'DavchaLLM': 'DavchaLLM',
