@@ -900,7 +900,7 @@ class DavchaTextEncodeQwenImageEditPlus(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="TextEncodeQwenImageEditPlus",
+            node_id="DavchaTextEncodeQwenImageEditPlus",
             category="advanced/conditioning",
             inputs=[
                 io.Clip.Input("clip"),
@@ -998,3 +998,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'DavchaMaskImage': 'Mask Image (Davcha)',
     'DavchaPop': 'Pop',
 }
+
