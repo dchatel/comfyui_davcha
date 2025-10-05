@@ -863,8 +863,10 @@ def viterbi_diff(a, b):
     diff.reverse()
     return diff
 
-def get_highlow(lorapath, m):
-    x = os.path.normpath(m[0][0])
+def get_highlow(lorapath, model):
+    x = glob(os.path.join(lorapath, '**', f'{model[:model.rfind(".")]}.safetensors'), recursive=True)[0]
+    x = os.path.relpath(x, lorapath)
+    x = os.path.normpath(x)
     files = [os.path.relpath(f, lorapath) for f in glob(os.path.join(lorapath, os.path.dirname(x), '*.safetensors'))]
     files.sort(key=lambda f: viterbi_distance(x, f))
     other = files[1]
@@ -890,7 +892,7 @@ class DavchaWan22LoraTagLoader:
         loraspath = folder_paths.get_folder_paths('loras')[0]
         m = re.findall(r'<lora:([^:]+):([^>]+)>', txt)
         for model, weight in m:
-            lora_high, lora_low = get_highlow(loraspath, [(model, weight)])
+            lora_high, lora_low = get_highlow(loraspath, model)
             high, _ = LoraLoader().load_lora(high, None, lora_high, float(weight), float(weight))
             low, _ = LoraLoader().load_lora(low, None, lora_low, float(weight), float(weight))
         txt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
