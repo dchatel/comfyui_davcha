@@ -281,7 +281,7 @@ class ApplyMask:
         _, _, h, w = image.shape
         mask = F.resize(mask, (h, w), InterpolationMode.BICUBIC)
         image = image.permute(0,2,3,1)[:,:,:,:3]
-        image *= mask[...,None]
+        image = image * mask[...,None]
         return (image, )
     
 class DStack:
@@ -864,7 +864,9 @@ def viterbi_diff(a, b):
     return diff
 
 def get_highlow(lorapath, model):
-    x = glob(os.path.join(lorapath, '**', f'{model[:model.rfind(".")]}.safetensors'), recursive=True)[0]
+    if not model.endswith('.safetensors'):
+        model = f'{model}.safetensors'
+    x = glob(os.path.join(lorapath, '**', model), recursive=True)[0]
     x = os.path.relpath(x, lorapath)
     x = os.path.normpath(x)
     files = [os.path.relpath(f, lorapath) for f in glob(os.path.join(lorapath, os.path.dirname(x), '*.safetensors'))]
