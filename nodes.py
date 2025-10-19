@@ -64,12 +64,12 @@ class PadAndResize:
                 (th - int(sh*scale)+1)//2,
             )
             mask = F.pad(mask, phw, fill=0, padding_mode='constant')
-            if mask.sum() != np.prod(mask.shape[-2:]):
-                dist = ndimage.distance_transform_edt(mask)
-                soft_m = np.minimum(dist / 32, 1)
-                soft_m = torch.from_numpy(soft_m).type(torch.float32)
-                mask = soft_m
-            result = F.pad(result, phw, fill=0.5, padding_mode='edge')
+            # if mask.sum() != np.prod(mask.shape[-2:]):
+            #     dist = ndimage.distance_transform_edt(mask)
+            #     soft_m = np.minimum(dist / 32, 1)
+            #     soft_m = torch.from_numpy(soft_m).type(torch.float32)
+            #     mask = soft_m
+            result = F.pad(result, phw, fill=0, padding_mode='constant')
             if c != 4:
                 result = torch.cat((result, mask.unsqueeze(1)), 1)
             else:
@@ -82,11 +82,12 @@ class PadAndResize:
         top, bottom = [int(x * h) for x in [top, bottom]]
         mask = torch.ones(b, h, w, dtype=torch.float32)
         mask = F.pad(mask, (left, top, right, bottom), 0, padding_mode='constant')
-        dist = ndimage.distance_transform_edt(mask)
-        soft_m = np.minimum(dist / 32, 1)
-        soft_m = torch.from_numpy(soft_m).type(torch.float32)
-        mask = soft_m
-        image = F.pad(image, (left, top, right, bottom), 0.5, padding_mode='edge')
+        # if mask.sum() != np.prod(mask.shape[-2:]):
+        #     dist = ndimage.distance_transform_edt(mask)
+        #     soft_m = np.minimum(dist / 32, 1)
+        #     soft_m = torch.from_numpy(soft_m).type(torch.float32)
+        #     mask = soft_m
+        image = F.pad(image, (left, top, right, bottom), 0, padding_mode='constant')
         if c != 4:
             image = torch.cat((image, mask.unsqueeze(1)), 1)
         else:
@@ -900,6 +901,30 @@ class DavchaWan22LoraTagLoader:
         txt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
         return (high, low, txt)
 
+class DavchaWan22LoraTagParser:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'txt': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+        }}
+    RETURN_NAMES = ('high','low', 'txt')
+    RETURN_TYPES = ('STRING','STRING', 'STRING')
+    FUNCTION = "run"
+    CATEGORY = "davcha"
+        
+    def run(self, txt):
+        loraspath = folder_paths.get_folder_paths('loras')[0]
+        m = re.findall(r'<lora:([^:]+):([^>]+)>', txt)
+        highs, lows = [], []
+        for model, weight in m:
+            lora_high, lora_low = get_highlow(loraspath, model)
+            highs.append(f'<lora:{lora_high}:{weight}>')
+            lows.append(f'<lora:{lora_low}:{weight}>')
+        highs = ''.join(highs)
+        lows = ''.join(lows)
+        txt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
+        return (highs, lows, txt)
+
 class DavchaTextEncodeQwenImageEditPlus(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -949,9 +974,62 @@ class DavchaTextEncodeQwenImageEditPlus(io.ComfyNode):
             conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": ref_latents}, append=True)
         return io.NodeOutput(conditioning)
 
+class DavchaEmptyLatent:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {
+                    "default": 1024, 
+                    "min": 16, 
+                    "max": 8192, 
+                    "step": 8,
+                    "tooltip": "Width in pixels (will be converted to latent space)"
+                }),
+                "height": ("INT", {
+                    "default": 1024, 
+                    "min": 16, 
+                    "max": 8192, 
+                    "step": 8,
+                    "tooltip": "Height in pixels (will be converted to latent space)"
+                }),
+                "channel_count": ("INT", {
+                    "default": 4,
+                    "tooltip": "Number of channels in the latent space"
+                }),
+                "random_scale": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -100.0, 
+                    "max": 100.0,
+                    "step": 0.0000001,
+                    "tooltip": "Scale of the random noise added to the latent"
+                }),
+                "batch_size": ("INT", {
+                    "default": 1, 
+                    "min": 1, 
+                    "max": 4096,
+                    "tooltip": "Number of latents to generate"
+                })
+            }
+        }
+    
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "generate"
+    CATEGORY = "davcha"
+    
+    def generate(self, width: int, height: int, channel_count: int, random_scale: float, batch_size: int = 1):
+        latent_width = width // 8
+        latent_height = height // 8
+        
+        latent = torch.randn((1, channel_count, height // 8, width // 8)) * random_scale
+
+        return ({"samples": latent},)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaEmptyLatent': DavchaEmptyLatent,
     'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
     'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
+    'DavchaWan22LoraTagParser': DavchaWan22LoraTagParser,
     'DavchaLoadLLM': DavchaLoadLLM,
     'DavchaLLM': DavchaLLM,
     'DavchaLLMAdvanced': DavchaLLMAdvanced,
@@ -977,8 +1055,10 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaEmptyLatent': 'Empty Latent',
     'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
     'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
+    'DavchaWan22LoraTagParser': 'Wan22 Lora Tag Parser',
     'DavchaLoadLLM': 'DavchaLoadLLM',
     'DavchaLLM': 'DavchaLLM',
     'DavchaLLMAdvanced': 'DavchaLLMAdvanced',
