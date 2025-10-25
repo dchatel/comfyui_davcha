@@ -974,59 +974,7 @@ class DavchaTextEncodeQwenImageEditPlus(io.ComfyNode):
             conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": ref_latents}, append=True)
         return io.NodeOutput(conditioning)
 
-class DavchaEmptyLatent:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {
-                    "default": 1024, 
-                    "min": 16, 
-                    "max": 8192, 
-                    "step": 8,
-                    "tooltip": "Width in pixels (will be converted to latent space)"
-                }),
-                "height": ("INT", {
-                    "default": 1024, 
-                    "min": 16, 
-                    "max": 8192, 
-                    "step": 8,
-                    "tooltip": "Height in pixels (will be converted to latent space)"
-                }),
-                "channel_count": ("INT", {
-                    "default": 4,
-                    "tooltip": "Number of channels in the latent space"
-                }),
-                "random_scale": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -100.0, 
-                    "max": 100.0,
-                    "step": 0.0000001,
-                    "tooltip": "Scale of the random noise added to the latent"
-                }),
-                "batch_size": ("INT", {
-                    "default": 1, 
-                    "min": 1, 
-                    "max": 4096,
-                    "tooltip": "Number of latents to generate"
-                })
-            }
-        }
-    
-    RETURN_TYPES = ("LATENT",)
-    FUNCTION = "generate"
-    CATEGORY = "davcha"
-    
-    def generate(self, width: int, height: int, channel_count: int, random_scale: float, batch_size: int = 1):
-        latent_width = width // 8
-        latent_height = height // 8
-        
-        latent = torch.randn((1, channel_count, height // 8, width // 8)) * random_scale
-
-        return ({"samples": latent},)
-
 NODE_CLASS_MAPPINGS = {
-    'DavchaEmptyLatent': DavchaEmptyLatent,
     'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
     'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
     'DavchaWan22LoraTagParser': DavchaWan22LoraTagParser,
@@ -1055,7 +1003,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    'DavchaEmptyLatent': 'Empty Latent',
     'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
     'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
     'DavchaWan22LoraTagParser': 'Wan22 Lora Tag Parser',
