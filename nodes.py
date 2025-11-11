@@ -11,6 +11,7 @@ import node_helpers
 import folder_paths
 import comfy
 from nodes import LoraLoader
+import nodes
 from comfy_api.latest import io
 import math
 
@@ -1148,7 +1149,42 @@ class DavchaScheduledTextEncoderQwenImageEditPlus(io.ComfyNode):
 
         return io.NodeOutput(final_conditioning)
 
+class DavchaQwenImageEditLoraTagLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {'required':{
+            'model': ('MODEL',),
+            'txt': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
+        }}
+        
+    RETURN_NAMES = ('model', 'txt')
+    RETURN_TYPES = ('MODEL', 'STRING')
+    FUNCTION = "run"
+    CATEGORY = "davcha"
+    
+    def run(self, model, txt):
+        loraspath = folder_paths.get_folder_paths('loras')[0]
+        
+        NunchakuQwenImageLoraLoader = nodes.NODE_CLASS_MAPPINGS['NunchakuQwenImageLoraLoader']
+        loader = NunchakuQwenImageLoraLoader()
+
+        ms = re.findall(r'<lora:([^:]+):([^>]+)>', txt)
+        rtxt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
+
+        mod = model.clone()
+        for lora, strength in ms:
+            strength = float(strength)
+            if not lora.endswith('.safetensors'):
+                lora = f'{lora}.safetensors'
+            x = glob(os.path.join(loraspath, '**', lora), recursive=True)[0]
+            x = os.path.relpath(x, loraspath)
+            x = os.path.normpath(x)
+            mod,*_ = loader.load_lora(mod, x, strength)
+        
+        return (mod, rtxt)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaQwenImageEditLoraTagLoader': DavchaQwenImageEditLoraTagLoader,
     'DavchaScheduledTextEncoderQwenImageEditPlus': DavchaScheduledTextEncoderQwenImageEditPlus,
     'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
     'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
@@ -1178,6 +1214,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaQwenImageEditLoraTagLoader': 'Qwen Image Edit Lora Tag Loader',
     'DavchaScheduledTextEncoderQwenImageEditPlus': 'Scheduled Text Encoder Qwen Image Edit Plus',
     'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
     'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
