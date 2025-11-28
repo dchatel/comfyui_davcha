@@ -997,153 +997,205 @@ class DavchaScheduledTextEncoderQwenImageEditPlus(io.ComfyNode):
     @classmethod
     def execute(cls, clip, prompt, vae=None, image1=None, image2=None, image3=None) -> io.NodeOutput:
         images = [image1, image2, image3]
-        # 1. PARSE INPUTS
-        # =================
+        
+        # 1. PARSE PROMPT & SCHEDULES
+        # ===========================
         llama_template = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-        parse_float = lambda x: float(x) if x is not None and x.strip() != '' else None
-
-        # IMPROVED: Regex now makes the strength part optional and uses a clear ':' prefix for it.
-        # Groups: 1:index, 2:start, 3:end, 4:ms, 5:us, 6:commands
-        re_img = r'img(\d+)(?::(\d*\.?\d+)-(\d*\.?\d+))?(?::\s*(\d*\.?\d+)(?:,(\d*\.?\d+))?)?((?:\s+novl|\s+noref)*)'
-        image_schedules_raw = regex.findall(re_img, prompt)
-        text_prompt_base = regex.sub(re_img, '', prompt).strip()
+        
+        # Regex Explanation:
+        # img(\d+)       -> Matches "img1", "img2"
+        # ( ... )        -> Group 2: Captures the parameters string
+        # (?:\s+ ... )*  -> Matches sequence of parameters separated by spaces
+        # Inner Choices:
+        #   novl|noref                     -> Flags
+        #   \d+(?:\.\d+)?-\d+(?:\.\d+)?    -> Time Range (e.g. 0.5-1.0)
+        #   \d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)? -> Strength (e.g. 0.8 or 0.8,0.5)
+        re_block = r'img(\d+)((?:\s+(?:novl|noref|\d+(?:\.\d+)?-\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)?))*)'
+        
+        image_schedules_raw = regex.findall(re_block, prompt)
+        text_prompt_base = regex.sub(re_block, '', prompt).strip()
 
         image_schedules = []
-        for i, s, e, ms, us, commands in image_schedules_raw:
-            command_str = commands.strip()
+        
+        for i_str, params_str in image_schedules_raw:
+            idx = int(i_str) - 1 # Convert to 0-based index
             
-            # IMPROVED: Handle optional strength values with defaults.
-            ms_parsed = parse_float(ms)
-            us_parsed = parse_float(us)
-            final_ms = ms_parsed if ms_parsed is not None else 1.0
-            final_us = us_parsed if us_parsed is not None else final_ms
+            # CRITICAL: Ignore schedule if image input is missing
+            if idx < 0 or idx >= len(images) or images[idx] is None:
+                continue
+
+            # Defaults
+            start, end = 0.0, 1.0
+            ms, us = 1.0, 1.0
+            novl = False
+            noref = False
+
+            # Parse parameters (Flexible Order)
+            tokens = params_str.strip().split()
+            for token in tokens:
+                if token == 'novl':
+                    novl = True
+                elif token == 'noref':
+                    noref = True
+                elif '-' in token:
+                    # Time Range: 0.5-1.0
+                    try:
+                        s_str, e_str = token.split('-')
+                        start = float(s_str)
+                        end = float(e_str)
+                    except ValueError: pass
+                else:
+                    # Strength: 0.8 or 0.8,0.5
+                    try:
+                        if ',' in token:
+                            ms_str, us_str = token.split(',')
+                            ms = float(ms_str)
+                            us = float(us_str)
+                        else:
+                            ms = float(token)
+                            us = float(token)
+                    except ValueError: pass
 
             image_schedules.append({
-                "index": int(i) - 1,
-                "start": parse_float(s) if s else 0.0,
-                "end": parse_float(e) if e else 1.0,
-                "ms": final_ms,
-                "us": final_us,
-                "noref": 'noref' in command_str,
-                "novl": 'novl' in command_str,
+                "index": idx,
+                "start": start,
+                "end": end,
+                "ms": ms,
+                "us": us,
+                "noref": noref,
+                "novl": novl,
             })
 
-        # Add default schedules for any images that were not explicitly mentioned
-        scheduled_image_indices = {s['index'] for s in image_schedules}
-        if images is not None:
-            for i, image in enumerate(images):
-                if image is not None and i not in scheduled_image_indices:
-                    image_schedules.append({
-                        "index": i, "start": 0.0, "end": 1.0, "ms": 1.0, "us": 1.0,
-                        "noref": False, "novl": False,
-                    })
+        # Add default schedules for connected images that weren't mentioned in prompt
+        scheduled_indices = {s['index'] for s in image_schedules}
+        for i, img in enumerate(images):
+            if img is not None and i not in scheduled_indices:
+                image_schedules.append({
+                    "index": i, "start": 0.0, "end": 1.0, "ms": 1.0, "us": 1.0,
+                    "noref": False, "novl": False,
+                })
 
         prompt_schedules = parse(text_prompt_base)
 
-        # 2. PRE-PROCESS IMAGES (Done once to save computation)
-        # ======================================================
-        preprocessed_images = []
+        # 2. PRE-PROCESS IMAGES
+        # =====================
+        preprocessed_images = [None] * len(images)
         for i, image in enumerate(images):
-            if image is None:
-                preprocessed_images.append(None)
+            if image is None: 
                 continue
-            # ... (rest of the pre-processing logic is unchanged) ...
+
+            # Handle Mask/RGB
             if image.shape[-1] == 4:
                 mask = image[:,:,:,3:4].permute(0, 3, 1, 2)
                 image_rgb = image[:,:,:,:3]
             else:
                 mask = torch.zeros((1, 1, image.shape[1], image.shape[2]), device=image.device)
                 image_rgb = image
+            
+            # Prepare Vision Tokens (Resize)
             samples = image_rgb.permute(0, 3, 1, 2)
             total = int(384 * 384)
             scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
             width = round(samples.shape[3] * scale_by)
             height = round(samples.shape[2] * scale_by)
             s_resized = comfy.utils.common_upscale(samples, width, height, "area", "disabled")
+            
             entry = {"image_vl": s_resized.permute(0, 2, 3, 1)}
+            
+            # Prepare Latents (VAE)
             if vae is not None:
                 lat = vae.encode(image_rgb)
                 *_, H, W = lat.shape
                 m = torch.nn.functional.interpolate(mask, size=(H, W), mode='bilinear', align_corners=False)
                 entry["base_latent"] = lat
                 entry["latent_mask"] = m
-            preprocessed_images.append(entry)
+            
+            preprocessed_images[i] = entry
 
-        # 3. UNIFY SCHEDULES AND CREATE INTERVALS
-        # ========================================
-        # This section remains unchanged.
+        # 3. CALCULATE INTERVALS
+        # ======================
         timestamps = {0.0, 1.0}
         for _, (s, e) in prompt_schedules:
-            timestamps.add(s)
-            timestamps.add(e)
+            timestamps.add(s); timestamps.add(e)
         for sched in image_schedules:
-            timestamps.add(sched["start"])
-            timestamps.add(sched["end"])
+            timestamps.add(sched["start"]); timestamps.add(sched["end"])
+            
         sorted_timestamps = sorted(list(timestamps))
         intervals = []
         for i in range(len(sorted_timestamps) - 1):
-            start, end = sorted_timestamps[i], sorted_timestamps[i+1]
-            if start < end:
-                intervals.append((start, end))
+            if sorted_timestamps[i] < sorted_timestamps[i+1]:
+                intervals.append((sorted_timestamps[i], sorted_timestamps[i+1]))
 
-        # 4. BUILD CONDITIONING FOR EACH INTERVAL
-        # =======================================
+        # 4. BUILD CONDITIONING
+        # =====================
         final_conditioning = []
+        
         for start, end in intervals:
             midpoint = (start + end) / 2.0
+            
+            # Identify active text
             active_prompt_text = ""
             for txt, (p_start, p_end) in prompt_schedules:
                 if p_start <= midpoint < p_end:
                     active_prompt_text = txt
                     break
             
-            active_images_data = []
-            for img_sched in image_schedules:
-                if img_sched["start"] <= midpoint < img_sched["end"]:
-                    active_images_data.append(img_sched)
+            # Identify active images
+            active_images_data = [
+                s for s in image_schedules if s["start"] <= midpoint < s["end"]
+            ]
             
-            # Continue only if there's an active prompt or at least one active image
+            # Optimization: Skip empty intervals
             if not active_prompt_text.strip() and not active_images_data:
                 continue
 
             active_images_data.sort(key=lambda x: x['index'])
 
-            image_placeholders = ""
+            image_placeholders = []
             interval_images_vl = []
             interval_ref_latents = []
 
             for data in active_images_data:
                 idx = data['index']
-                if idx >= len(preprocessed_images) or preprocessed_images[idx] is None:
-                    continue
+                entry = preprocessed_images[idx]
+                if entry is None: continue # Safety check
                 
+                # Vision Token Assembly
                 if not data['novl']:
-                    image_placeholders += f"Picture {idx + 1}: <|vision_start|><|image_pad|><|vision_end|> "
-                    interval_images_vl.append(preprocessed_images[idx]["image_vl"])
+                    image_placeholders.append(f"Picture {idx + 1}: <|vision_start|><|image_pad|><|vision_end|>")
+                    interval_images_vl.append(entry["image_vl"])
                 
-                if not data['noref'] and "base_latent" in preprocessed_images[idx]:
-                    lat = preprocessed_images[idx]["base_latent"]
-                    m = preprocessed_images[idx]["latent_mask"]
-                    ms = data["ms"]
-                    us = data["us"]
-                    scaled_lat = lat * (1 - m) * ms + lat * m * us
+                # Reference Latent Assembly
+                if not data['noref'] and "base_latent" in entry:
+                    lat = entry["base_latent"]
+                    m = entry["latent_mask"]
+                    # Apply Mask Strengths
+                    scaled_lat = lat * (1 - m) * data["ms"] + lat * m * data["us"]
                     interval_ref_latents.append(scaled_lat)
 
-            # IMPROVED: Safely join prompt parts to avoid extra spaces
-            prompt_parts = []
+            # Combine Prompts
+            full_prompt_parts = []
             if image_placeholders:
-                prompt_parts.append(image_placeholders.strip())
+                full_prompt_parts.append(" ".join(image_placeholders))
             if active_prompt_text:
-                prompt_parts.append(active_prompt_text.strip())
-            full_prompt = " ".join(prompt_parts)
+                full_prompt_parts.append(active_prompt_text.strip())
             
+            full_prompt = " ".join(full_prompt_parts)
+            
+            # Encode
             tokens = clip.tokenize(full_prompt, images=interval_images_vl, llama_template=llama_template)
             conditioning_chunk = clip.encode_from_tokens_scheduled(tokens)
             
+            # Apply Reference Latents
             if interval_ref_latents:
-                conditioning_chunk = node_helpers.conditioning_set_values(conditioning_chunk, {"reference_latents": interval_ref_latents}, append=True)
+                conditioning_chunk = node_helpers.conditioning_set_values(
+                    conditioning_chunk, {"reference_latents": interval_ref_latents}, append=True
+                )
             
-            conditioning_chunk = node_helpers.conditioning_set_values(conditioning_chunk, {"start_percent": start, "end_percent": end})
+            # Set Time Bounds
+            conditioning_chunk = node_helpers.conditioning_set_values(
+                conditioning_chunk, {"start_percent": start, "end_percent": end}
+            )
             
             final_conditioning.extend(conditioning_chunk)
 
