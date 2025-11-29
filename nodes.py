@@ -1008,9 +1008,9 @@ class DavchaScheduledTextEncoderQwenImageEditPlus(io.ComfyNode):
         # (?:\s+ ... )*  -> Matches sequence of parameters separated by spaces
         # Inner Choices:
         #   novl|noref                     -> Flags
-        #   \d+(?:\.\d+)?-\d+(?:\.\d+)?    -> Time Range (e.g. 0.5-1.0)
-        #   \d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)? -> Strength (e.g. 0.8 or 0.8,0.5)
-        re_block = r'img(\d+)((?:\s+(?:novl|noref|\d+(?:\.\d+)?-\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)?))*)'
+        #   \d*\.?\d+-\d*\.?\d+    -> Time Range (e.g. 0.5-1.0)
+        #   \d*\.?\d+(?:,\d*\.?\d+)? -> Strength (e.g. 0.8 or 0.8,0.5)
+        re_block = r'img(\d+)((?:\s+(?:novl|noref|\d*\.?\d+-\d*\.?\d+|\d*\.?\d+(?:,\d*\.?\d+)?))*)'
         
         image_schedules_raw = regex.findall(re_block, prompt)
         text_prompt_base = regex.sub(re_block, '', prompt).strip()
