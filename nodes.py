@@ -996,7 +996,7 @@ class DavchaScheduledTextEncoderQwenImageEditPlus(io.ComfyNode):
     
     @classmethod
     def execute(cls, clip, prompt, vae=None, image1=None, image2=None, image3=None) -> io.NodeOutput:
-        images = [image1, image2, image3]
+        images = [x for x in [image1, image2, image3] if x is not None]
         
         # 1. PARSE PROMPT & SCHEDULES
         # ===========================
