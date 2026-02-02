@@ -1292,8 +1292,8 @@ class DavchaSamplerCustomAdvanced(io.ComfyNode):
             inputs=[
                 io.Noise.Input("noise"),
                 io.Guider.Input("guider"),
-                io.String.Input("samplers_list", multiline=True, dynamic_prompts=False),
-                io.String.Input("sigmas_list", multiline=True, dynamic_prompts=False),
+                io.String.Input("samplers_list", multiline=False, dynamic_prompts=False),
+                io.String.Input("sigmas_list", multiline=False, dynamic_prompts=False),
                 io.Latent.Input("latent_image"),
             ],
             outputs=[
