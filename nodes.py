@@ -13,6 +13,10 @@ import comfy
 from nodes import LoraLoader
 import nodes
 from comfy_api.latest import io
+import latent_preview
+from comfy.samplers import sampler_object
+from comfy_extras.nodes_custom_sampler import Noise_EmptyNoise
+import json
 import math
 
 class PadAndResize:
@@ -510,6 +514,11 @@ class DavchaCLIPTextEncode:
     CATEGORY = "davcha"
     
     def run(self, clip, text):
+        if text.strip() == "":
+            tokens = clip.tokenize("")
+            output = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+            cond = output.pop("cond")
+            return ([[[cond, output]]], )
         text = text.split('|')
         result = []
         for txt in text:
@@ -1206,6 +1215,7 @@ class DavchaQwenImageEditLoraTagLoader:
     def INPUT_TYPES(s):
         return {'required':{
             'model': ('MODEL',),
+            'mode': (['sequential', 'stack'],),
             'txt': ('STRING', {'multiline': True, 'dynamicPrompts': True}),
         }}
         
@@ -1213,29 +1223,131 @@ class DavchaQwenImageEditLoraTagLoader:
     RETURN_TYPES = ('MODEL', 'STRING')
     FUNCTION = "run"
     CATEGORY = "davcha"
-    
-    def run(self, model, txt):
+
+    def run(self, model, mode, txt):
         loraspath = folder_paths.get_folder_paths('loras')[0]
         
-        NunchakuQwenImageLoraLoader = nodes.NODE_CLASS_MAPPINGS['NunchakuQwenImageLoraLoader']
-        loader = NunchakuQwenImageLoraLoader()
+        if mode == 'sequential':
+            NunchakuQwenImageLoraLoader = nodes.NODE_CLASS_MAPPINGS['NunchakuQwenImageLoraLoader']
+            loader = NunchakuQwenImageLoraLoader()
+        else: # stack
+            NunchakuQwenImageLoraStack = nodes.NODE_CLASS_MAPPINGS['NunchakuQwenImageLoraStackV2']
+            loader = NunchakuQwenImageLoraStack()
 
         ms = re.findall(r'<lora:([^:]+):([^>]+)>', txt)
         rtxt = re.sub(r'<lora:[^:]+:[^>]+>', '', txt)
 
         mod = model.clone()
-        for lora, strength in ms:
+        kwargs = {}
+        for i, (lora, strength) in enumerate(ms):
             strength = float(strength)
             if not lora.endswith('.safetensors'):
                 lora = f'{lora}.safetensors'
             x = glob(os.path.join(loraspath, '**', lora), recursive=True)[0]
             x = os.path.relpath(x, loraspath)
             x = os.path.normpath(x)
-            mod,*_ = loader.load_lora(mod, x, strength)
+            if mode == 'sequential':
+                mod,*_ = loader.load_lora(mod, x, strength)
+            else: # stack
+                kwargs.update({f'lora_name_{i+1}': x, f'lora_strength_{i+1}': strength})
+        if mode == 'stack':
+            mod, *_ = loader.load_lora_stack(mod, len(ms), **kwargs)
         
         return (mod, rtxt)
 
+class DavchaRescaleSigmas(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaRescaleSigmas",
+            category="advanced/sampling",
+            inputs=[
+                io.Sigmas.Input("sigmas"),
+                io.String.Input("scales", multiline=False, dynamic_prompts=False),
+            ],
+            outputs=[
+                io.Sigmas.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, sigmas, scales) -> io.NodeOutput:
+        if scales.strip() == "":
+            return io.NodeOutput(sigmas)
+        
+        scale_factors = [float(s) for s in scales.split(',')]
+        rescaled_sigmas = sigmas.clone()
+        for i, factor in enumerate(scale_factors):
+            if i < len(rescaled_sigmas):
+                rescaled_sigmas[i] = rescaled_sigmas[i] * factor
+                
+        return io.NodeOutput(rescaled_sigmas)
+
+class DavchaSamplerCustomAdvanced(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaSamplerCustomAdvanced",
+            category="sampling/custom_sampling",
+            inputs=[
+                io.Noise.Input("noise"),
+                io.Guider.Input("guider"),
+                io.String.Input("samplers_list", multiline=True, dynamic_prompts=False),
+                io.String.Input("sigmas_list", multiline=True, dynamic_prompts=False),
+                io.Latent.Input("latent_image"),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="output"),
+                io.Latent.Output(display_name="denoised_output"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, noise, guider, samplers_list, sigmas_list, latent_image) -> io.NodeOutput:
+        samplers_names = [s.strip() for s in samplers_list.split(',')]
+        sigmas_l = json.loads(sigmas_list)
+        sigmas_l = [torch.tensor(s, device=comfy.model_management.intermediate_device()) for s in sigmas_l]
+        latent = latent_image
+        latent_image = latent["samples"]
+        latent = latent.copy()
+        latent_image = comfy.sample.fix_empty_latent_channels(guider.model_patcher, latent_image, latent.get("downscale_ratio_spacial", None))
+        latent["samples"] = latent_image
+
+        noise_mask = None
+        if "noise_mask" in latent:
+            noise_mask = latent["noise_mask"]
+
+        x0_output = {}
+        sigmas_len = sum([len(s) - 1 for s in sigmas_l])
+        callback = latent_preview.prepare_callback(guider.model_patcher, sigmas_len, x0_output)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        curr_noise = noise.generate_noise(latent)
+        for sampler_name, sigmas in zip(samplers_names, sigmas_l):
+            sampler = sampler_object(sampler_name)            
+            samples = guider.sample(curr_noise, latent_image, sampler, sigmas, denoise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise.seed)
+            latent_image = samples
+            curr_noise = Noise_EmptyNoise().generate_noise({'samples': latent_image})
+        samples = samples.to(comfy.model_management.intermediate_device())
+
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out["samples"] = samples
+        if "x0" in x0_output:
+            x0_out = guider.model_patcher.model.process_latent_out(x0_output["x0"].cpu())
+            if samples.is_nested:
+                latent_shapes = [x.shape for x in samples.unbind()]
+                x0_out = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0_out, latent_shapes))
+            out_denoised = latent.copy()
+            out_denoised["samples"] = x0_out
+        else:
+            out_denoised = out
+        return io.NodeOutput(out, out_denoised)
+
+    sample = execute
+    
 NODE_CLASS_MAPPINGS = {
+    'DavchaSamplerCustomAdvanced': DavchaSamplerCustomAdvanced,
+    'DavchaRescaleSigmas': DavchaRescaleSigmas,
     'DavchaQwenImageEditLoraTagLoader': DavchaQwenImageEditLoraTagLoader,
     'DavchaScheduledTextEncoderQwenImageEditPlus': DavchaScheduledTextEncoderQwenImageEditPlus,
     'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
@@ -1266,6 +1378,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaSamplerCustomAdvanced': 'Custom Sampler Advanced',
+    'DavchaRescaleSigmas': 'Rescale Sigmas',
     'DavchaQwenImageEditLoraTagLoader': 'Qwen Image Edit Lora Tag Loader',
     'DavchaScheduledTextEncoderQwenImageEditPlus': 'Scheduled Text Encoder Qwen Image Edit Plus',
     'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
