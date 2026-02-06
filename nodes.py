@@ -14,7 +14,7 @@ from nodes import LoraLoader
 import nodes
 from comfy_api.latest import io
 import latent_preview
-from comfy.samplers import sampler_object
+from comfy.samplers import sampler_object, KSAMPLER
 from comfy_extras.nodes_custom_sampler import Noise_EmptyNoise
 import json
 import math
@@ -1344,9 +1344,108 @@ class DavchaSamplerCustomAdvanced(io.ComfyNode):
         return io.NodeOutput(out, out_denoised)
 
     sample = execute
-    
+
+class DavchaSamplerCustomAdvanced2(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaSamplerCustomAdvanced2",
+            category="sampling/custom_sampling",
+            inputs=[
+                io.Noise.Input("noise"),
+                io.Guider.Input("guider"),
+                io.String.Input("samplers", multiline=False, dynamic_prompts=False),
+                io.Sigmas.Input("sigmas"),
+                io.String.Input("splits", multiline=False, dynamic_prompts=False),
+                io.Latent.Input("latent_image"),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="output"),
+                io.Latent.Output(display_name="denoised_output"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, noise, guider, samplers, sigmas, splits, latent_image) -> io.NodeOutput:
+        samplers_names = [s.strip() for s in samplers.split(',')]
+        splits_list = [int(s.strip()) for s in splits.split(',')]
+        splits_l = np.array([0] + splits_list + [len(sigmas)])
+        sigmas_l = [sigmas[start:end] for start, end in list(zip(splits_l, splits_l[1:]+1))]
+        latent = latent_image
+        latent_image = latent["samples"]
+        latent = latent.copy()
+        latent_image = comfy.sample.fix_empty_latent_channels(guider.model_patcher, latent_image, latent.get("downscale_ratio_spacial", None))
+        latent["samples"] = latent_image
+
+        noise_mask = None
+        if "noise_mask" in latent:
+            noise_mask = latent["noise_mask"]
+
+        x0_output = {}
+        sigmas_len = sum([len(s) - 1 for s in sigmas_l])
+        callback = latent_preview.prepare_callback(guider.model_patcher, sigmas_len, x0_output)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        curr_noise = noise.generate_noise(latent)
+        for sampler_name, sigmas in zip(samplers_names, sigmas_l):
+            sampler = sampler_object(sampler_name)            
+            samples = guider.sample(curr_noise, latent_image, sampler, sigmas, denoise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise.seed)
+            latent_image = samples
+            curr_noise = Noise_EmptyNoise().generate_noise({'samples': latent_image})
+        samples = samples.to(comfy.model_management.intermediate_device())
+
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out["samples"] = samples
+        if "x0" in x0_output:
+            x0_out = guider.model_patcher.model.process_latent_out(x0_output["x0"].cpu())
+            if samples.is_nested:
+                latent_shapes = [x.shape for x in samples.unbind()]
+                x0_out = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0_out, latent_shapes))
+            out_denoised = latent.copy()
+            out_denoised["samples"] = x0_out
+        else:
+            out_denoised = out
+        return io.NodeOutput(out, out_denoised)
+
+    sample = execute
+        
+def sampler_function(model_k, noise, sigmas, extra_args=None, callback=None, disable=None, **extra_options):
+    samplers = extra_options.pop('samplers')
+    splits = extra_options.pop('splits')
+    splits_l = np.array([0] + splits + [len(sigmas)])
+    sigmas_l = [sigmas[start:end] for start, end in list(zip(splits_l, splits_l[1:]+1))]
+    for sampler, sigmas in zip(samplers, sigmas_l):
+        extras = dict(**extra_options, **sampler.extra_options)
+        noise = sampler.sampler_function(model_k, noise, sigmas, extra_args=extra_args, callback=callback, disable=disable, **extras)
+    return noise
+        
+class DavchaScheduledSampler(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.Autogrow.TemplatePrefix(input=io.Sampler.Input("sampler"), prefix="sampler", min=1, max=10)
+        return io.Schema(
+            node_id="DavchaScheduledSampler",
+            category="sampling/custom_sampling/samplers",
+            inputs=[
+                io.Autogrow.Input("autogrow", template=template),
+                io.String.Input("splits", multiline=False, dynamic_prompts=False),
+            ],
+            outputs=[
+                io.Sampler.Output(),
+            ]
+        )
+   
+    @classmethod
+    def execute(cls, autogrow, splits) -> io.NodeOutput:
+        splits_list = [int(s.strip()) for s in splits.split(',')]
+        samplers = [v for k, v in sorted(autogrow.items())]
+        
+        return io.NodeOutput(KSAMPLER(sampler_function, extra_options={'samplers': samplers, 'splits': splits_list}))
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaScheduledSampler': DavchaScheduledSampler,
     'DavchaSamplerCustomAdvanced': DavchaSamplerCustomAdvanced,
+    'DavchaSamplerCustomAdvanced2': DavchaSamplerCustomAdvanced2,
     'DavchaRescaleSigmas': DavchaRescaleSigmas,
     'DavchaQwenImageEditLoraTagLoader': DavchaQwenImageEditLoraTagLoader,
     'DavchaScheduledTextEncoderQwenImageEditPlus': DavchaScheduledTextEncoderQwenImageEditPlus,
@@ -1378,7 +1477,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaScheduledSampler': 'Scheduled Sampler',
     'DavchaSamplerCustomAdvanced': 'Custom Sampler Advanced',
+    'DavchaSamplerCustomAdvanced2': 'Custom Sampler Advanced 2',
     'DavchaRescaleSigmas': 'Rescale Sigmas',
     'DavchaQwenImageEditLoraTagLoader': 'Qwen Image Edit Lora Tag Loader',
     'DavchaScheduledTextEncoderQwenImageEditPlus': 'Scheduled Text Encoder Qwen Image Edit Plus',
