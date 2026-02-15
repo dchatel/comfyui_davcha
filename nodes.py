@@ -18,6 +18,9 @@ from comfy.samplers import sampler_object, KSAMPLER
 from comfy_extras.nodes_custom_sampler import Noise_EmptyNoise
 import json
 import math
+from PIL import Image
+from io import BytesIO
+import base64
 
 class PadAndResize:
     @classmethod
@@ -1442,7 +1445,136 @@ class DavchaScheduledSampler(io.ComfyNode):
         
         return io.NodeOutput(KSAMPLER(sampler_function, extra_options={'samplers': samplers, 'splits': splits_list}))
 
+class DavchaQwenVL3Loader(io.ComfyNode):
+    gguf_folder = os.path.join(folder_paths.models_dir, "LLM", "GGUF")
+    
+    @classmethod
+    def define_schema(cls):
+        path = os.path.join(cls.gguf_folder, "**", "*.gguf")
+        files = list(filter(lambda x: "mmproj" not in x, glob(path, recursive=True)))
+        
+        options = []
+        for file in files:
+            llm = Llama(file, vocab_only=True, verbose=False)
+            arch = llm.metadata.get("general.architecture", "llama")
+            max_n_ctx = int(llm.metadata.get(f"{arch}.context_length"))
+            max_n_gpu_layers = int(llm.metadata.get(f"{arch}.block_count"))
+            
+            inputs = [
+                io.Int.Input("n_ctx", min=512, max=max_n_ctx, default=4096),
+                io.Int.Input("n_gpu_layers", min=-1, max=max_n_gpu_layers, default=-1),
+            ]
+                
+            name = os.path.relpath(file, cls.gguf_folder)
+            option = io.DynamicCombo.Option(name, inputs)
+            options.append(option)
+        
+        return io.Schema(
+            node_id="DavchaQwenVL3Loader",
+            category="davcha/llm",
+            inputs=[
+                io.DynamicCombo.Input("model", options=options),
+                io.Int.Input("n_batch", min=64, max=32768, default=512),
+                io.Int.Input("pool_size", min=1048576, max=10485760, default=4194304, step=524288),
+            ],
+            outputs=[
+                io.Custom("DavchaQwenVL3Model").Output(),
+            ]
+        )
+    
+    @classmethod
+    def execute(cls, model, n_batch, pool_size):
+        from llama_cpp import Llama
+            
+        n_ctx = model.get("n_ctx", 4096)
+        n_gpu_layers = model.get("n_gpu_layers", -1)
+        model = model.get("model", None)
+        if model is None:
+            raise FileExistsError("model")
+        model = os.path.join(cls.gguf_folder, model)
+        
+        mmproj = next(iter(glob(os.path.join(os.path.dirname(model), "*mmproj*"))), None)
+        if mmproj:
+            from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+            mmproj = Qwen3VLChatHandler(clip_model_path=mmproj, force_reasoning=False)
+
+        llm = Llama(
+            model_path=model,
+            chat_handler=mmproj,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            swa_full=True,
+            n_batch=n_batch,
+            pool_size=pool_size,
+            verbose=False
+        )
+        
+        return io.NodeOutput(llm)
+
+class DavchaQwenVL3(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaQwenVL3",
+            category="davcha/llm",
+            inputs=[
+                io.Custom("DavchaQwenVL3Model").Input("llm"),
+                io.String.Input("system", multiline=True, dynamic_prompts=False),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=False),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                io.Int.Input("max_tokens", min=1, default=512),
+                io.Float.Input("temperature", min=0.0, max=2.0, default=0.9),
+                io.Float.Input("top_p", min=0.0, max=1.0, default=0.95),
+                io.Int.Input("top_k", min=0, max=100, default=40),
+                io.Float.Input("repeat_penalty", min=0.5, max=2.0, default=1.2),
+                io.Image.Input("images", optional=True),
+            ],
+            outputs=[
+                io.String.Output()
+            ]
+        )
+    
+    @classmethod
+    def execute(cls, llm, system, prompt, seed, max_tokens, temperature, top_p, top_k, repeat_penalty, images=None):
+        content = [
+            {'type': 'text', 'text': prompt}
+        ]
+        
+        if images is not None:
+            for image in images:
+                array = (image*255).clamp(0, 255).byte().cpu().numpy()
+                pil_img = Image.fromarray(array, mode="RGB")
+                buf = BytesIO()
+                pil_img.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                content.append({'type': 'image_url', 'image_url': {'url': f"data:image/png;base64,{b64}"}})
+
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content}
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt}
+            ]
+        
+        result = llm.create_chat_completion(
+            seed=seed,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            stop=["<|im_end|>", "<|im_start|>", "<im_end>", "<im_start>", "</im_end>", "</im_start>"]
+        )
+        
+        return io.NodeOutput(result['choices'][0]['message']['content'])
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaQwenVL3Loader': DavchaQwenVL3Loader,
+    'DavchaQwenVL3': DavchaQwenVL3,
     'DavchaScheduledSampler': DavchaScheduledSampler,
     'DavchaSamplerCustomAdvanced': DavchaSamplerCustomAdvanced,
     'DavchaSamplerCustomAdvanced2': DavchaSamplerCustomAdvanced2,
@@ -1477,6 +1609,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaQwenVL3Loader': 'DavchaQwenVL3Loader',
+    'DavchaQwenVL3': 'DavchaQwenVL3',
     'DavchaScheduledSampler': 'Scheduled Sampler',
     'DavchaSamplerCustomAdvanced': 'Custom Sampler Advanced',
     'DavchaSamplerCustomAdvanced2': 'Custom Sampler Advanced 2',
