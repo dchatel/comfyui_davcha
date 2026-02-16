@@ -1536,11 +1536,9 @@ class DavchaQwenVL3(io.ComfyNode):
     
     @classmethod
     def execute(cls, llm, system, prompt, seed, max_tokens, temperature, top_p, top_k, repeat_penalty, images=None):
-        content = [
-            {'type': 'text', 'text': prompt}
-        ]
-        
         if images is not None:
+            content = []
+            
             for image in images:
                 array = (image*255).clamp(0, 255).byte().cpu().numpy()
                 pil_img = Image.fromarray(array, mode="RGB")
@@ -1548,6 +1546,8 @@ class DavchaQwenVL3(io.ComfyNode):
                 pil_img.save(buf, format="PNG")
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                 content.append({'type': 'image_url', 'image_url': {'url': f"data:image/png;base64,{b64}"}})
+            
+            content.append({'type': 'text', 'text': prompt})
 
             messages = [
                 {"role": "system", "content": system},
