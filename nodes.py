@@ -1527,6 +1527,7 @@ class DavchaQwenVL3(io.ComfyNode):
                 io.Float.Input("top_p", min=0.0, max=1.0, default=0.95),
                 io.Int.Input("top_k", min=0, max=100, default=40),
                 io.Float.Input("repeat_penalty", min=0.5, max=2.0, default=1.2),
+                io.String.Input("response_format", multiline=True, dynamic_prompts=False, default=""),
                 io.Image.Input("images", optional=True),
             ],
             outputs=[
@@ -1535,7 +1536,7 @@ class DavchaQwenVL3(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, llm, system, prompt, seed, max_tokens, temperature, top_p, top_k, repeat_penalty, images=None):
+    def execute(cls, llm, system, prompt, seed, max_tokens, temperature, top_p, top_k, repeat_penalty, response_format, images=None):
         if images is not None:
             content = []
             
@@ -1567,6 +1568,7 @@ class DavchaQwenVL3(io.ComfyNode):
             top_p=top_p,
             top_k=top_k,
             repeat_penalty=repeat_penalty,
+            response_format=response_format,
             stop=["<|im_end|>", "<|im_start|>", "<im_end>", "<im_start>", "</im_end>", "</im_start>"]
         )
         
