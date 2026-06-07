@@ -737,7 +737,7 @@ if os.path.isdir(gguf_folder):
 else:
     gguf_files = []
     
-class DavchaLoadLLM:
+class OldDavchaLoadLLM:
     @classmethod
     def INPUT_TYPES(s):
         return {'required':{
@@ -796,7 +796,7 @@ class DavchaLLMAdvanced:
         llm_result = model.create_chat_completion(msgs, **generate_kwargs)
         return (llm_result['choices'][0]['message']['content'].strip(),)
 
-class DavchaLLM:
+class OldDavchaLLM:
     @classmethod
     def INPUT_TYPES(s):
         return {'required':{
@@ -1559,6 +1559,8 @@ class DavchaQwenVL3(io.ComfyNode):
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt}
             ]
+            
+        response_format = json.loads(response_format) if response_format.strip() != "" else None
         
         result = llm.create_chat_completion(
             seed=seed,
@@ -1574,7 +1576,201 @@ class DavchaQwenVL3(io.ComfyNode):
         
         return io.NodeOutput(result['choices'][0]['message']['content'])
 
+class OldDavchaPromptEnricher(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="OldDavchaPromptEnricher",
+            category="davcha/llm",
+            inputs=[
+                io.Custom("DavchaQwenVL3Model").Input("llm"),
+                io.String.Input("system", multiline=True, dynamic_prompts=False),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=False),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                io.Int.Input("max_tokens", min=1, default=512),
+                io.Float.Input("temperature", min=0.0, max=2.0, default=0.9, step=0.01),
+                io.Float.Input("top_p", min=0.0, max=1.0, default=0.95, step=0.01),
+                io.Int.Input("top_k", min=0, max=100, default=40),
+                io.Float.Input("repeat_penalty", min=0.5, max=2.0, default=1.2, step=0.01),
+                io.Boolean.Input("force_json_output", default=True),
+                io.Image.Input("images", optional=True),
+            ],
+            outputs=[
+                io.String.Output()
+            ]
+        )
+    
+    @classmethod
+    def execute(cls, llm, system, prompt, seed, max_tokens, temperature, top_p, top_k, repeat_penalty, force_json_output, images=None):
+        if not re.search(r'\{([^}]+)\}', prompt):
+            return io.NodeOutput(prompt)
+        
+        m = re.findall(r'\{([^}]+)\}', prompt)
+        keys = '\n'.join([f'{x}:' for x in m])
+
+        p = f"""PROMPT:\n{prompt}\n\nKEYS:\n{keys}"""
+        
+        if images is not None:
+            content = []
+            
+            for image in images:
+                array = (image*255).clamp(0, 255).byte().cpu().numpy()
+                pil_img = Image.fromarray(array, mode="RGB")
+                buf = BytesIO()
+                pil_img.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                content.append({'type': 'image_url', 'image_url': {'url': f"data:image/png;base64,{b64}"}})
+            
+            content.append({'type': 'text', 'text': p})
+
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content}
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": p}
+            ]
+
+        if force_json_output:
+            response_format = {
+                "type": "json_object",
+                "schema": {
+                    "type": "object",
+                    "properties": {key:{"type":"string"} for key in m},
+                    "required": m
+                }
+            }
+        else:
+            response_format = None
+        
+        result = llm.create_chat_completion(
+            seed=seed,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            response_format=response_format,
+            stop=["<|im_end|>", "<|im_start|>", "<im_end>", "<im_start>", "</im_end>", "</im_start>"]
+        )
+        groups = result['choices'][0]['message']['content']
+        import json_repair
+        p = prompt
+        for k, v in json_repair.loads(groups).items():
+            p = p.replace(f"{{{k}}}", "\n".join([str(x) for x in v]) if isinstance(v, list) else str(v))
+        
+        return io.NodeOutput(p)
+    
+class DavchaImageStack(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.Autogrow.TemplatePrefix(input=io.Image.Input("image", optional=True), prefix="image", min=1, max=10)
+        return io.Schema(
+            node_id="DavchaImageStack",
+            category="image",
+            inputs=[
+                io.Autogrow.Input("autogrow", template=template, optional=True),
+            ],
+            outputs=[
+                io.Image.Output()
+            ]
+        )
+    
+    @classmethod
+    def execute(cls, autogrow) -> io.NodeOutput: 
+        images = [v for k, v in sorted(autogrow.items()) if v is not None]
+        return io.NodeOutput(images)
+
+class DavchaScheduledReferenceLatent(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaScheduledReferenceLatent",
+            category="latent",
+            inputs=[
+                io.Conditioning.Input("cond"),
+                io.Latent.Input("latent", optional=True),
+                io.Float.Input("start", min=0.0, max=1.0, default=0.0, step=0.01),
+                io.Float.Input("end", min=0.0, max=1.0, default=1.0, step=0.01),
+            ],
+            outputs=[
+                io.Conditioning.Output()
+            ]
+        )
+
+    @classmethod
+    def execute(cls, cond, latent, start, end) -> io.NodeOutput:
+        ts = {0.0,1.0,start,end}
+        for x in cond:
+            if "start_percent" in x[1]:
+                ts.add(x[1]['start_percent'])
+                ts.add(x[1]['end_percent'])
+            else:
+                x[1]["start_percent"] = 0
+                x[1]["end_percent"] = 1
+        ts = sorted(list(ts))
+
+        c = []
+
+        for s, e in zip(ts, ts[1:]):
+            midpoint = (s + e) / 2.0
+
+            for x in cond:
+                if x[1]['start_percent'] <= midpoint < x[1]['end_percent']:
+                    active_cond = [x]
+                break
+
+            if start <= midpoint < end:
+                active_cond = node_helpers.conditioning_set_values(active_cond, {"reference_latents": [latent["samples"]]}, append=True)
+
+            c.extend(node_helpers.conditioning_set_values(active_cond, {"start_percent": s, "end_percent": e}))
+
+        return io.NodeOutput(c)
+
+class DavchaScaleImageToTotalPixelsMax(io.ComfyNode):
+    upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+    crop_methods = ["disabled", "center"]
+    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaScaleImageToTotalPixelsMax",
+            display_name="Scale Image to Total Pixels",
+            category="image/upscaling",
+            inputs=[
+                io.Combo.Input("upscale_method", options=cls.upscale_methods),
+                io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01),
+                io.Int.Input("resolution_steps", default=1, min=1, max=256, advanced=True),
+                io.Image.Input("image", optional=True),
+            ],
+            outputs=[
+                io.Image.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, upscale_method, megapixels, resolution_steps, image=None) -> io.NodeOutput:
+        if image is None:
+            return io.NodeOutput(None)
+        samples = image.movedim(-1,1)
+        total = megapixels * 1024 * 1024
+
+        scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
+        width = round(samples.shape[3] * scale_by / resolution_steps) * resolution_steps
+        height = round(samples.shape[2] * scale_by / resolution_steps) * resolution_steps
+
+        s = comfy.utils.common_upscale(samples, int(width), int(height), upscale_method, "disabled")
+        s = s.movedim(1,-1)
+        return io.NodeOutput(s)
+
 NODE_CLASS_MAPPINGS = {
+    'DavchaScheduledReferenceLatent': DavchaScheduledReferenceLatent,
+    'DavchaScaleImageToTotalPixelsMax': DavchaScaleImageToTotalPixelsMax,
+    'DavchaImageStack': DavchaImageStack,
+    'OldDavchaPromptEnricher': OldDavchaPromptEnricher,
     'DavchaQwenVL3Loader': DavchaQwenVL3Loader,
     'DavchaQwenVL3': DavchaQwenVL3,
     'DavchaScheduledSampler': DavchaScheduledSampler,
@@ -1586,8 +1782,8 @@ NODE_CLASS_MAPPINGS = {
     'DavchaTextEncodeQwenImageEditPlus': DavchaTextEncodeQwenImageEditPlus,
     'DavchaWan22LoraTagLoader': DavchaWan22LoraTagLoader,
     'DavchaWan22LoraTagParser': DavchaWan22LoraTagParser,
-    'DavchaLoadLLM': DavchaLoadLLM,
-    'DavchaLLM': DavchaLLM,
+    'OldDavchaLoadLLM': OldDavchaLoadLLM,
+    'OldDavchaLLM': OldDavchaLLM,
     'DavchaLLMAdvanced': DavchaLLMAdvanced,
     'PadAndResize': PadAndResize,
     'SmartMask': SmartMask,
@@ -1611,6 +1807,10 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaScheduledReferenceLatent': 'Scheduled Reference Latent',
+    'DavchaScaleImageToTotalPixelsMax': 'Scale Image To Total Pixels Max',
+    'DavchaImageStack': 'Davcha Image Stack',
+    'OldDavchaPromptEnricher': 'Davcha Prompt Enricher',
     'DavchaQwenVL3Loader': 'DavchaQwenVL3Loader',
     'DavchaQwenVL3': 'DavchaQwenVL3',
     'DavchaScheduledSampler': 'Scheduled Sampler',
@@ -1622,8 +1822,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'DavchaTextEncodeQwenImageEditPlus': 'Text Encode Qwen Image Edit Plus',
     'DavchaWan22LoraTagLoader': 'Wan22 Lora Tag Loader',
     'DavchaWan22LoraTagParser': 'Wan22 Lora Tag Parser',
-    'DavchaLoadLLM': 'DavchaLoadLLM',
-    'DavchaLLM': 'DavchaLLM',
+    'OldDavchaLoadLLM': 'OldDavchaLoadLLM',
+    'OldDavchaLLM': 'OldDavchaLLM',
     'DavchaLLMAdvanced': 'DavchaLLMAdvanced',
     'PadAndResize': 'PadAndResize',
     'SmartMask': 'SmartMask',
