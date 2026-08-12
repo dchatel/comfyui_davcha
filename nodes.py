@@ -1765,8 +1765,108 @@ class DavchaScaleImageToTotalPixelsMax(io.ComfyNode):
         s = comfy.utils.common_upscale(samples, int(width), int(height), upscale_method, "disabled")
         s = s.movedim(1,-1)
         return io.NodeOutput(s)
+    
+class SpectralNoise:
+    def __init__(self, a, b, spectrum_tensor):
+        """
+        spectrum_tensor: A 1D PyTorch tensor. 
+        Example: torch.tensor([0.0, 0.5, 1.0, 5.0])
+        Index 0 represents the lowest frequencies (global shapes/structure).
+        The last index represents the highest frequencies (fine details/grain).
+        """
+        self.a = a
+        self.b = b
+        self.spectrum = spectrum_tensor
+        self.seed = 0
+
+    def create_radial_filter(self, H, W, device):
+        Y = torch.linspace(-1, 1, H, device=device)
+        X = torch.linspace(-1, 1, W, device=device)
+        y, x = torch.meshgrid(Y, X, indexing='ij')
+        
+        radius = torch.sqrt(x**2 + y**2)
+        radius = radius / radius.max()
+        
+        num_bins = len(self.spectrum)
+        if num_bins == 1:
+            return torch.full((H, W), self.spectrum[0], device=device)
+            
+        scaled_radius = radius * (num_bins - 1)
+        
+        lower_idx = scaled_radius.floor().long().clamp(0, num_bins - 1)
+        upper_idx = scaled_radius.ceil().long().clamp(0, num_bins - 1)
+        weight = scaled_radius - lower_idx 
+        
+        # --- SMOOTHSTEP UPGRADE ---
+        # Instead of a harsh linear transition, we ease-in and ease-out
+        weight = weight * weight * (3.0 - 2.0 * weight)
+        # --------------------------
+        
+        spectrum = self.spectrum.to(device)
+        lower_val = spectrum[lower_idx]
+        upper_val = spectrum[upper_idx]
+        
+        filter_2d = torch.lerp(lower_val, upper_val, weight)
+        return filter_2d
+
+    def generate_noise(self, input_latent):
+        # Assuming a and b are passed into this class during init
+        x = self.a.generate_noise(input_latent).to(torch.float32) # Fractal
+        y = self.b.generate_noise(input_latent).to(torch.float32) # Uniform
+        
+        device = input_latent["samples"].device
+        *_, H, W = input_latent["samples"].shape
+        
+        # Get frequency domain of both noises
+        fft_x = torch.fft.fftshift(torch.fft.fft2(x))
+        fft_y = torch.fft.fftshift(torch.fft.fft2(y))
+        
+        # Create interpolation mask based on the 1D tensor
+        # Here, the tensor should contain values between 0.0 and 1.0
+        mask_2d = self.create_radial_filter(H, W, device).unsqueeze(0).unsqueeze(0)
+        
+        # Blend in frequency domain
+        blended_fft = (mask_2d * fft_x) + ((1.0 - mask_2d) * fft_y)
+        
+        # Transform back
+        shaped = torch.fft.ifft2(torch.fft.ifftshift(blended_fft)).real
+        shaped = shaped.to(input_latent["samples"].dtype)
+        
+        # Normalize
+        shaped = (shaped - shaped.mean()) / shaped.std()
+        
+        return shaped
+
+class DavchaSpectralNoiseBlend(io.ComfyNode):
+    """
+    Blends a Fractal (A) and Uniform (B) noise together using a frequency-based mask.
+    0.0 uses pure Noise B. 1.0 uses pure Noise A.
+    """
+    
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DavchaSpectralNoiseBlend",
+            display_name="Spectral Noise Blend",
+            category="davcha/noise/spectral",
+            inputs=[
+                io.Noise.Input("noise_a"),
+                io.Noise.Input("noise_b"),
+                io.Sigmas.Input("spectrum", tooltip="1D tensor controlling frequency blending. 0.0 = Noise B, 1.0 = Noise A"),
+            ],
+            outputs=[
+                io.Noise.Output(),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, noise_a, noise_b, spectrum) -> io.NodeOutput:
+        blended_noise = SpectralNoise(noise_a, noise_b, spectrum)
+        
+        return io.NodeOutput(blended_noise)
 
 NODE_CLASS_MAPPINGS = {
+    'DavchaSpectralNoiseBlend': DavchaSpectralNoiseBlend,
     'DavchaScheduledReferenceLatent': DavchaScheduledReferenceLatent,
     'DavchaScaleImageToTotalPixelsMax': DavchaScaleImageToTotalPixelsMax,
     'DavchaImageStack': DavchaImageStack,
@@ -1807,6 +1907,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    'DavchaSpectralNoiseBlend': 'Spectral Noise Blend',
     'DavchaScheduledReferenceLatent': 'Scheduled Reference Latent',
     'DavchaScaleImageToTotalPixelsMax': 'Scale Image To Total Pixels Max',
     'DavchaImageStack': 'Davcha Image Stack',
