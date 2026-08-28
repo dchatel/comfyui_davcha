@@ -522,7 +522,7 @@ class DavchaCLIPTextEncode:
             output = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
             cond = output.pop("cond")
             return ([[[cond, output]]], )
-        text = text.split('|')
+        text = text.split('||')
         result = []
         for txt in text:
             texts = re.split(r"\b(AREA\(\s*(?:\d*\.?\d+\s*){4,5}\))", txt)
